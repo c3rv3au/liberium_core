@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoderDB - Interface d'édition</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>CoderDB - Interface d'édition</h1>
+            <div class="status" id="status">
+                <span id="node-status">Chargement...</span>
+                <button onclick="refreshStatus()" class="btn btn-sm">🔄</button>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-btn active" onclick="showTab('functions')">Fonctions</button>
+            <button class="tab-btn" onclick="showTab('editor')">Éditeur</button>
+            <button class="tab-btn" onclick="showTab('production')">Production</button>
+        </nav>
+
+        <!-- Onglet Fonctions -->
+        <div id="functions-tab" class="tab-content active">
+            <div class="toolbar">
+                <button onclick="showEditor()" class="btn btn-primary">➕ Nouvelle fonction</button>
+                <button onclick="loadFunctions()" class="btn">🔄 Actualiser</button>
+                <input type="text" id="search" placeholder="Rechercher..." onkeyup="filterFunctions()">
+            </div>
+
+            <div class="functions-grid" id="functions-list">
+                <!-- Les fonctions seront chargées ici -->
+            </div>
+        </div>
+
+        <!-- Onglet Éditeur -->
+        <div id="editor-tab" class="tab-content">
+            <div class="editor-container">
+                <div class="editor-header">
+                    <input type="text" id="function-name" placeholder="Nom de la fonction" class="form-input">
+                    <div class="editor-actions">
+                        <button onclick="saveFunction()" class="btn btn-primary">💾 Sauvegarder</button>
+                        <button onclick="testFunction()" class="btn btn-secondary">🧪 Tester</button>
+                        <button onclick="clearEditor()" class="btn btn-danger">🗑️ Effacer</button>
+                    </div>
+                </div>
+
+                <div class="editor-panels">
+                    <div class="panel">
+                        <h3>Paramètres d'entrée</h3>
+                        <div id="input-params">
+                            <div class="param-item">
+                                <input type="text" placeholder="Nom" class="param-name">
+                                <select class="param-type">
+                                    <option value="string">string</option>
+                                    <option value="number">number</option>
+                                    <option value="boolean">boolean</option>
+                                    <option value="object">object</option>
+                                    <option value="array">array</option>
+                                    <option value="any">any</option>
+                                </select>
+                                <input type="text" placeholder="Description" class="param-desc">
+                                <button onclick="removeParam(this)" class="btn-remove">❌</button>
+                            </div>
+                        </div>
+                        <button onclick="addInputParam()" class="btn btn-sm">➕ Ajouter</button>
+                    </div>
+
+                    <div class="panel">
+                        <h3>Paramètres de sortie</h3>
+                        <div id="output-params">
+                            <div class="param-item">
+                                <input type="text" placeholder="Nom" class="param-name">
+                                <select class="param-type">
+                                    <option value="string">string</option>
+                                    <option value="number">number</option>
+                                    <option value="boolean">boolean</option>
+                                    <option value="object">object</option>
+                                    <option value="array">array</option>
+                                    <option value="any">any</option>
+                                </select>
+                                <input type="text" placeholder="Description" class="param-desc">
+                                <button onclick="removeParam(this)" class="btn-remove">❌</button>
+                            </div>
+                        </div>
+                        <button onclick="addOutputParam()" class="btn btn-sm">➕ Ajouter</button>
+                    </div>
+                </div>
+
+                <div class="code-panels">
+                    <div class="code-panel">
+                        <h3>Code de la fonction</h3>
+                        <textarea id="function-code" placeholder="function(inputParams) {
+    // Votre code ici
+    return result;
+}" rows="15"></textarea>
+                    </div>
+
+                    <div class="code-panel">
+                        <h3>Code de test</h3>
+                        <textarea id="test-code" placeholder="// Tests pour votre fonction
+function test() {
+    const result = functionName(testParams);
+    console.assert(result === expectedValue, 'Test failed');
+    return 'Tests passed!';
+}" rows="15"></textarea>
+                    </div>
+                </div>
+
+                <div class="test-results" id="test-results" style="display: none;">
+                    <h3>Résultats des tests</h3>
+                    <pre id="test-output"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Onglet Production -->
+        <div id="production-tab" class="tab-content">
+            <div class="production-header">
+                <h2>Gestion de production</h2>
+                <p>Promouvoir les fonctions développées vers la production</p>
+            </div>
+
+            <div class="production-pipeline">
+                <div class="pipeline-section">
+                    <h3>🔧 Développement</h3>
+                    <div id="dev-functions" class="function-cards">
+                        <!-- Fonctions en développement -->
+                    </div>
+                </div>
+
+                <div class="pipeline-arrow">➡️</div>
+
+                <div class="pipeline-section">
+                    <h3>🚀 Production</h3>
+                    <div id="prod-functions" class="function-cards">
+                        <!-- Fonctions en production -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
