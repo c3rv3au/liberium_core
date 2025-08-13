@@ -37,18 +37,57 @@ module.exports = {
 		async loadFromDisk() {
 			try {
 				const dataFile = path.join(this.dbPath, "functions.json");
-				const data = await fs.readFile(dataFile, "utf8");
-				const functions = JSON.parse(data);
 				
+				// Vérifier si le fichier existe et n'est pas vide
+				let stats;
+				try {
+					stats = await fs.stat(dataFile);
+				} catch (err) {
+					if (err.code === "ENOENT") {
+						// Fichier n'existe pas, créer un fichier vide
+						await this.saveToDisk();
+						this.logger.info("Created new functions.json file");
+						return;
+					}
+					throw err;
+				}
+
+				// Si le fichier est vide, initialiser avec un objet vide
+				if (stats.size === 0) {
+					await this.saveToDisk();
+					this.logger.info("Initialized empty functions.json file");
+					return;
+				}
+
+				const data = await fs.readFile(dataFile, "utf8");
+				
+				// Vérifier si le contenu est vide ou seulement des espaces
+				if (!data.trim()) {
+					await this.saveToDisk();
+					this.logger.info("Reinitialized empty functions.json file");
+					return;
+				}
+
+				let functions;
+				try {
+					functions = JSON.parse(data);
+				} catch (parseError) {
+					this.logger.error("Invalid JSON in functions.json, reinitializing:", parseError.message);
+					await this.saveToDisk();
+					return;
+				}
+				
+				// Charger les fonctions
 				for (const [name, func] of Object.entries(functions)) {
 					this.storage.functions.set(name, func);
 				}
 				
 				this.logger.info(`Loaded ${this.storage.functions.size} functions from disk`);
 			} catch (err) {
-				if (err.code !== "ENOENT") {
-					this.logger.error("Error loading from disk:", err);
-				}
+				this.logger.error("Error loading from disk:", err);
+				// En cas d'erreur, réinitialiser le stockage
+				this.storage.functions.clear();
+				await this.saveToDisk();
 			}
 		},
 
