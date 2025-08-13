@@ -3,13 +3,83 @@ class CoderDBInterface {
     constructor() {
         this.currentFunction = null;
         this.functions = [];
+        this.editors = {};
+        this.currentTestFunction = null;
         this.init();
     }
 
     async init() {
+        await this.initializeMonacoEditor();
         await this.loadFunctions();
         await this.refreshStatus();
         this.loadProductionView();
+        this.populateFunctionSelect();
+    }
+
+    // Initialisation de Monaco Editor
+    async initializeMonacoEditor() {
+        return new Promise((resolve) => {
+            require.config({ 
+                paths: { 
+                    vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' 
+                }
+            });
+
+            require(['vs/editor/editor.main'], () => {
+                // Éditeur de code de fonction
+                this.editors.functionCode = monaco.editor.create(
+                    document.getElementById('function-code-editor'),
+                    {
+                        value: 'function(inputParams) {\n    // Votre code ici\n    return inputParams;\n}',
+                        language: 'javascript',
+                        theme: 'vs-dark',
+                        automaticLayout: true,
+                        minimap: { enabled: false },
+                        fontSize: 14,
+                        lineNumbers: 'on',
+                        roundedSelection: false,
+                        scrollBeyondLastLine: false,
+                        readOnly: false
+                    }
+                );
+
+                // Éditeur de code de test
+                this.editors.testCode = monaco.editor.create(
+                    document.getElementById('test-code-editor'),
+                    {
+                        value: '// Tests pour votre fonction\nfunction test(functionName, testInputs, console) {\n    const result = functionName(testInputs);\n    console.assert(result !== undefined, "Function should return a result");\n    return "Tests passed!";\n}',
+                        language: 'javascript',
+                        theme: 'vs-dark',
+                        automaticLayout: true,
+                        minimap: { enabled: false },
+                        fontSize: 14,
+                        lineNumbers: 'on',
+                        roundedSelection: false,
+                        scrollBeyondLastLine: false,
+                        readOnly: false
+                    }
+                );
+
+                // Éditeur d'aperçu de fonction (lecture seule)
+                this.editors.functionPreview = monaco.editor.create(
+                    document.getElementById('function-preview-editor'),
+                    {
+                        value: '// Sélectionnez une fonction pour voir son code',
+                        language: 'javascript',
+                        theme: 'vs',
+                        automaticLayout: true,
+                        minimap: { enabled: false },
+                        fontSize: 12,
+                        lineNumbers: 'on',
+                        roundedSelection: false,
+                        scrollBeyondLastLine: false,
+                        readOnly: true
+                    }
+                );
+
+                resolve();
+            });
+        });
     }
 
     // API Calls
@@ -45,6 +115,7 @@ class CoderDBInterface {
         try {
             this.functions = await this.apiCall('/functions');
             this.renderFunctions();
+            this.populateFunctionSelect();
         } catch (error) {
             console.error('Erreur chargement fonctions:', error);
         }
@@ -70,7 +141,7 @@ class CoderDBInterface {
                 <h3>${func.name}</h3>
                 <div class="function-meta">
                     <div>
-                        <span class="status-indicator status-${func.environment || 'dev'}"></span>
+                        <span class="status-indicator status-${func.environment === 'production' ? 'prod' : 'dev'}"></span>
                         ${func.environment === 'production' ? 'Production' : 'Développement'}
                     </div>
                     <div>Créé: ${new Date(func.createdAt).toLocaleDateString()}</div>
@@ -82,7 +153,7 @@ class CoderDBInterface {
                 </div>
                 <div class="function-actions">
                     <button onclick="app.editFunction('${func.name}')" class="btn btn-primary">✏️ Éditer</button>
-                    <button onclick="app.testFunction('${func.name}')" class="btn btn-secondary">🧪 Tester</button>
+                    <button onclick="app.selectFunctionForTesting('${func.name}')" class="btn btn-secondary">🧪 Tester</button>
                     <button onclick="app.cloneFunction('${func.name}')" class="btn">📋 Cloner</button>
                     ${func.environment !== 'production' ? 
                         `<button onclick="app.promoteToProduction('${func.name}')" class="btn" style="background: #28a745; color: white;">🚀 Production</button>` : 
@@ -117,12 +188,12 @@ class CoderDBInterface {
 
     async loadFunctionInEditor(name) {
         try {
-            const func = await this.apiCall(`/functions/${name}`);
+            const func = await this.apiCall(`/functions/${encodeURIComponent(name)}`);
             this.currentFunction = func;
             
             document.getElementById('function-name').value = func.name;
-            document.getElementById('function-code').value = func.code;
-            document.getElementById('test-code').value = func.testCode;
+            this.editors.functionCode.setValue(func.code);
+            this.editors.testCode.setValue(func.testCode);
             
             this.loadParams('input-params', func.inputParams || []);
             this.loadParams('output-params', func.outputParams || []);
@@ -145,7 +216,7 @@ class CoderDBInterface {
                     <option value="any" ${param.type === 'any' ? 'selected' : ''}>any</option>
                 </select>
                 <input type="text" placeholder="Description" class="param-desc" value="${param.description || ''}">
-                <button onclick="app.removeParam(this)" class="btn-remove">❌</button>
+                <button onclick="app.removeParam(this)" class="btn-remove">✕</button>
             </div>
         `).join('');
 
@@ -157,16 +228,14 @@ class CoderDBInterface {
     clearEditor() {
         this.currentFunction = null;
         document.getElementById('function-name').value = '';
-        document.getElementById('function-code').value = '';
-        document.getElementById('test-code').value = '';
+        this.editors.functionCode.setValue('function(inputParams) {\n    // Votre code ici\n    return inputParams;\n}');
+        this.editors.testCode.setValue('// Tests pour votre fonction\nfunction test(functionName, testInputs, console) {\n    const result = functionName(testInputs);\n    console.assert(result !== undefined, "Function should return a result");\n    return "Tests passed!";\n}');
         
         document.getElementById('input-params').innerHTML = '';
         document.getElementById('output-params').innerHTML = '';
         
         this.addInputParam();
         this.addOutputParam();
-        
-        document.getElementById('test-results').style.display = 'none';
     }
 
     addInputParam() {
@@ -192,7 +261,7 @@ class CoderDBInterface {
                 <option value="any">any</option>
             </select>
             <input type="text" placeholder="Description" class="param-desc">
-            <button onclick="app.removeParam(this)" class="btn-remove">❌</button>
+            <button onclick="app.removeParam(this)" class="btn-remove">✕</button>
         `;
         container.appendChild(paramDiv);
     }
@@ -217,8 +286,8 @@ class CoderDBInterface {
     async saveFunction() {
         try {
             const name = document.getElementById('function-name').value.trim();
-            const code = document.getElementById('function-code').value.trim();
-            const testCode = document.getElementById('test-code').value.trim();
+            const code = this.editors.functionCode.getValue().trim();
+            const testCode = this.editors.testCode.getValue().trim();
             
             if (!name || !code || !testCode) {
                 this.showError('Tous les champs sont requis');
@@ -237,11 +306,9 @@ class CoderDBInterface {
             };
 
             if (this.currentFunction) {
-                // Mise à jour
-                await this.apiCall(`/functions/${this.currentFunction.name}`, 'PUT', functionData);
+                await this.apiCall(`/functions/${encodeURIComponent(this.currentFunction.name)}`, 'PUT', functionData);
                 this.showSuccess('Fonction mise à jour avec succès');
             } else {
-                // Création
                 await this.apiCall('/functions', 'POST', functionData);
                 this.showSuccess('Fonction créée avec succès');
             }
@@ -253,67 +320,193 @@ class CoderDBInterface {
         }
     }
 
-    async testFunction() {
-        const code = document.getElementById('function-code').value.trim();
-        const testCode = document.getElementById('test-code').value.trim();
+    // Tests
+    populateFunctionSelect() {
+        const select = document.getElementById('function-select');
+        if (!select) return;
+
+        select.innerHTML = '<option value="">Sélectionner une fonction</option>' +
+            this.functions.map(func => `<option value="${func.name}">${func.name}</option>`).join('');
+    }
+
+    selectFunctionForTesting(functionName) {
+        this.showTab('testing');
+        const select = document.getElementById('function-select');
+        select.value = functionName;
+        this.loadFunctionForTesting();
+    }
+
+    showTestTab() {
+        this.showTab('testing');
+        if (this.currentFunction) {
+            const select = document.getElementById('function-select');
+            select.value = this.currentFunction.name;
+            this.loadFunctionForTesting();
+        }
+    }
+
+    async loadFunctionForTesting() {
+        const select = document.getElementById('function-select');
+        const functionName = select.value;
         
-        if (!code || !testCode) {
-            this.showError('Code de fonction et de test requis');
+        if (!functionName) {
+            this.clearTestInterface();
             return;
         }
 
         try {
-            // Exécuter le test dans un contexte sécurisé
-            const result = this.executeTest(code, testCode);
+            const func = await this.apiCall(`/functions/${encodeURIComponent(functionName)}`);
+            this.currentTestFunction = func;
             
-            const resultsDiv = document.getElementById('test-results');
-            const outputPre = document.getElementById('test-output');
+            // Mettre à jour l'aperçu
+            this.editors.functionPreview.setValue(func.code);
             
-            outputPre.textContent = result;
-            resultsDiv.style.display = 'block';
+            // Générer les champs de paramètres de test
+            this.generateTestInputs(func.inputParams || []);
             
+            // Réinitialiser les résultats
+            this.clearTestResults();
         } catch (error) {
-            const resultsDiv = document.getElementById('test-results');
-            const outputPre = document.getElementById('test-output');
-            
-            outputPre.textContent = `Erreur: ${error.message}`;
-            resultsDiv.style.display = 'block';
+            console.error('Erreur chargement fonction pour test:', error);
         }
     }
 
-    executeTest(functionCode, testCode) {
-        try {
-            // Créer un contexte sécurisé pour l'exécution
-            const functionWrapper = new Function('return ' + functionCode)();
-            const testWrapper = new Function('functionName', testCode);
-            
-            // Capturer la sortie console
-            let output = '';
-            const originalLog = console.log;
-            const originalAssert = console.assert;
-            
-            console.log = (...args) => {
-                output += args.join(' ') + '\n';
-            };
-            
-            console.assert = (condition, message) => {
-                if (!condition) {
-                    output += `ASSERTION FAILED: ${message}\n`;
-                }
-            };
-            
-            // Exécuter le test
-            const result = testWrapper(functionWrapper);
-            
-            // Restaurer console
-            console.log = originalLog;
-            console.assert = originalAssert;
-            
-            return output + (result ? `\nRésultat: ${result}` : '');
-            
-        } catch (error) {
-            throw new Error(`Erreur d'exécution: ${error.message}`);
+    generateTestInputs(inputParams) {
+        const container = document.getElementById('test-inputs');
+        
+        if (inputParams.length === 0) {
+            container.innerHTML = '<p style="color: #666; font-style: italic;">Cette fonction n\'a aucun paramètre d\'entrée.</p>';
+            return;
         }
+
+        container.innerHTML = inputParams.map(param => {
+            const inputId = `test-input-${param.name}`;
+            return `
+                <div class="test-input-item">
+                    <label for="${inputId}">
+                        ${param.name} (${param.type})
+                        ${param.description ? `- ${param.description}` : ''}
+                    </label>
+                    ${this.generateInputField(param, inputId)}
+                </div>
+            `;
+        }).join('');
+    }
+
+    generateInputField(param, inputId) {
+        switch (param.type) {
+            case 'boolean':
+                return `
+                    <select id="${inputId}" data-type="boolean">
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                    </select>
+                `;
+            case 'number':
+                return `<input type="number" id="${inputId}" data-type="number" placeholder="Entrez un nombre">`;
+            case 'object':
+            case 'array':
+                return `<textarea id="${inputId}" data-type="${param.type}" placeholder="Entrez du JSON valide" rows="3"></textarea>`;
+            default:
+                return `<input type="text" id="${inputId}" data-type="string" placeholder="Entrez une valeur">`;
+        }
+    }
+
+    getTestInputs() {
+        const container = document.getElementById('test-inputs');
+        const inputs = container.querySelectorAll('[id^="test-input-"]');
+        const testInputs = {};
+
+        inputs.forEach(input => {
+            const paramName = input.id.replace('test-input-', '');
+            const type = input.getAttribute('data-type');
+            let value = input.value.trim();
+
+            if (!value) return;
+
+            try {
+                switch (type) {
+                    case 'number':
+                        testInputs[paramName] = parseFloat(value);
+                        break;
+                    case 'boolean':
+                        testInputs[paramName] = value === 'true';
+                        break;
+                    case 'object':
+                    case 'array':
+                        testInputs[paramName] = JSON.parse(value);
+                        break;
+                    default:
+                        testInputs[paramName] = value;
+                }
+            } catch (error) {
+                throw new Error(`Erreur de format pour ${paramName}: ${error.message}`);
+            }
+        });
+
+        return testInputs;
+    }
+
+    async runTest() {
+        if (!this.currentTestFunction) {
+            this.showError('Veuillez sélectionner une fonction à tester');
+            return;
+        }
+
+        try {
+            const testInputs = this.getTestInputs();
+            const result = await this.apiCall(`/functions/${encodeURIComponent(this.currentTestFunction.name)}/test`, 'POST', {
+                testInputs
+            });
+
+            this.displayTestResults(result);
+        } catch (error) {
+            console.error('Erreur test:', error);
+            this.displayTestResults({
+                success: false,
+                error: error.message,
+                executedAt: new Date().toISOString()
+            });
+        }
+    }
+
+    displayTestResults(result) {
+        const container = document.getElementById('test-results');
+        
+        if (result.success) {
+            container.className = 'test-results success';
+            container.innerHTML = `
+                <h4 style="color: #28a745; margin-bottom: 10px;">✅ Test réussi</h4>
+                <div class="test-output">Résultat de la fonction: ${JSON.stringify(result.result, null, 2)}</div>
+                ${result.testResults ? `
+                    <div style="margin-top: 15px;">
+                        <h5>Résultats des tests unitaires:</h5>
+                        <div class="test-output">${result.testResults.success ? '✅ ' + result.testResults.message : '❌ ' + result.testResults.error}</div>
+                    </div>
+                ` : ''}
+                <small style="color: #666; margin-top: 10px; display: block;">Exécuté le ${new Date(result.executedAt).toLocaleString()}</small>
+            `;
+        } else {
+            container.className = 'test-results error';
+            container.innerHTML = `
+                <h4 style="color: #dc3545; margin-bottom: 10px;">❌ Test échoué</h4>
+                <div class="test-output">Erreur: ${result.error}</div>
+                <small style="color: #666; margin-top: 10px; display: block;">Exécuté le ${new Date(result.executedAt).toLocaleString()}</small>
+            `;
+        }
+    }
+
+    clearTestInterface() {
+        document.getElementById('test-inputs').innerHTML = '<p style="color: #666; font-style: italic;">Sélectionnez une fonction pour commencer les tests.</p>';
+        this.clearTestResults();
+        this.editors.functionPreview.setValue('// Sélectionnez une fonction pour voir son code');
+        this.currentTestFunction = null;
+    }
+
+    clearTestResults() {
+        const container = document.getElementById('test-results');
+        container.className = 'test-results';
+        container.innerHTML = '<p class="no-results">Aucun test exécuté</p>';
     }
 
     // Actions sur les fonctions
@@ -323,9 +516,8 @@ class CoderDBInterface {
 
     async cloneFunction(name) {
         try {
-            const func = await this.apiCall(`/functions/${name}`);
+            const func = await this.apiCall(`/functions/${encodeURIComponent(name)}`);
             
-            // Créer une copie avec un nouveau nom
             const newName = prompt('Nom de la nouvelle fonction:', `${func.name}_copy`);
             if (!newName) return;
             
@@ -351,7 +543,7 @@ class CoderDBInterface {
         }
 
         try {
-            await this.apiCall(`/functions/${name}`, 'DELETE');
+            await this.apiCall(`/functions/${encodeURIComponent(name)}`, 'DELETE');
             this.showSuccess('Fonction supprimée avec succès');
             await this.loadFunctions();
             this.loadProductionView();
@@ -366,7 +558,7 @@ class CoderDBInterface {
         }
 
         try {
-            await this.apiCall(`/functions/${name}/promote`, 'POST');
+            await this.apiCall(`/functions/${encodeURIComponent(name)}/promote`, 'POST');
             this.showSuccess('Fonction promue en production');
             await this.loadFunctions();
             this.loadProductionView();
@@ -435,7 +627,6 @@ class CoderDBInterface {
 
     // Navigation
     showTab(tabName) {
-        // Masquer tous les onglets
         document.querySelectorAll('.tab-content').forEach(tab => {
             tab.classList.remove('active');
         });
@@ -444,26 +635,17 @@ class CoderDBInterface {
             btn.classList.remove('active');
         });
 
-        // Afficher l'onglet sélectionné
         document.getElementById(`${tabName}-tab`).classList.add('active');
         document.querySelector(`[onclick="showTab('${tabName}')"]`).classList.add('active');
-    }
 
-    // Modal
-    showModal(title, content) {
-        const modal = document.getElementById('modal');
-        const modalBody = document.getElementById('modal-body');
-        
-        modalBody.innerHTML = `
-            <h2>${title}</h2>
-            ${content}
-        `;
-        
-        modal.style.display = 'block';
-    }
-
-    closeModal() {
-        document.getElementById('modal').style.display = 'none';
+        // Redimensionner les éditeurs Monaco si nécessaire
+        if (this.editors.functionCode) {
+            setTimeout(() => {
+                this.editors.functionCode.layout();
+                this.editors.testCode.layout();
+                this.editors.functionPreview.layout();
+            }, 100);
+        }
     }
 
     // Messages
@@ -503,7 +685,9 @@ class CoderDBInterface {
         setTimeout(() => {
             toast.style.transform = 'translateX(400px)';
             setTimeout(() => {
-                document.body.removeChild(toast);
+                if (document.body.contains(toast)) {
+                    document.body.removeChild(toast);
+                }
             }, 300);
         }, 3000);
     }
@@ -532,8 +716,16 @@ function saveFunction() {
     app.saveFunction();
 }
 
-function testFunction() {
-    app.testFunction();
+function showTestTab() {
+    app.showTestTab();
+}
+
+function loadFunctionForTesting() {
+    app.loadFunctionForTesting();
+}
+
+function runTest() {
+    app.runTest();
 }
 
 function clearEditor() {
@@ -557,13 +749,14 @@ function refreshStatus() {
 }
 
 function closeModal() {
-    app.closeModal();
+    const modal = document.getElementById('modal');
+    modal.style.display = 'none';
 }
 
 // Fermer modal en cliquant à l'extérieur
 window.onclick = function(event) {
     const modal = document.getElementById('modal');
     if (event.target === modal) {
-        app.closeModal();
+        closeModal();
     }
 }

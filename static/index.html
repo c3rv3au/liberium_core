@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CoderDB - Interface d'édition</title>
     <link rel="stylesheet" href="/styles.css">
+    <!-- Monaco Editor CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -19,6 +21,7 @@
         <nav class="tabs">
             <button class="tab-btn active" onclick="showTab('functions')">Fonctions</button>
             <button class="tab-btn" onclick="showTab('editor')">Éditeur</button>
+            <button class="tab-btn" onclick="showTab('testing')">Tests</button>
             <button class="tab-btn" onclick="showTab('production')">Production</button>
         </nav>
 
@@ -42,7 +45,7 @@
                     <input type="text" id="function-name" placeholder="Nom de la fonction" class="form-input">
                     <div class="editor-actions">
                         <button onclick="saveFunction()" class="btn btn-primary">💾 Sauvegarder</button>
-                        <button onclick="testFunction()" class="btn btn-secondary">🧪 Tester</button>
+                        <button onclick="showTestTab()" class="btn btn-secondary">🧪 Tester</button>
                         <button onclick="clearEditor()" class="btn btn-danger">🗑️ Effacer</button>
                     </div>
                 </div>
@@ -50,41 +53,13 @@
                 <div class="editor-panels">
                     <div class="panel">
                         <h3>Paramètres d'entrée</h3>
-                        <div id="input-params">
-                            <div class="param-item">
-                                <input type="text" placeholder="Nom" class="param-name">
-                                <select class="param-type">
-                                    <option value="string">string</option>
-                                    <option value="number">number</option>
-                                    <option value="boolean">boolean</option>
-                                    <option value="object">object</option>
-                                    <option value="array">array</option>
-                                    <option value="any">any</option>
-                                </select>
-                                <input type="text" placeholder="Description" class="param-desc">
-                                <button onclick="removeParam(this)" class="btn-remove">❌</button>
-                            </div>
-                        </div>
+                        <div id="input-params"></div>
                         <button onclick="addInputParam()" class="btn btn-sm">➕ Ajouter</button>
                     </div>
 
                     <div class="panel">
                         <h3>Paramètres de sortie</h3>
-                        <div id="output-params">
-                            <div class="param-item">
-                                <input type="text" placeholder="Nom" class="param-name">
-                                <select class="param-type">
-                                    <option value="string">string</option>
-                                    <option value="number">number</option>
-                                    <option value="boolean">boolean</option>
-                                    <option value="object">object</option>
-                                    <option value="array">array</option>
-                                    <option value="any">any</option>
-                                </select>
-                                <input type="text" placeholder="Description" class="param-desc">
-                                <button onclick="removeParam(this)" class="btn-remove">❌</button>
-                            </div>
-                        </div>
+                        <div id="output-params"></div>
                         <button onclick="addOutputParam()" class="btn btn-sm">➕ Ajouter</button>
                     </div>
                 </div>
@@ -92,26 +67,49 @@
                 <div class="code-panels">
                     <div class="code-panel">
                         <h3>Code de la fonction</h3>
-                        <textarea id="function-code" placeholder="function(inputParams) {
-    // Votre code ici
-    return result;
-}" rows="15"></textarea>
+                        <div id="function-code-editor" class="monaco-editor"></div>
                     </div>
 
                     <div class="code-panel">
                         <h3>Code de test</h3>
-                        <textarea id="test-code" placeholder="// Tests pour votre fonction
-function test() {
-    const result = functionName(testParams);
-    console.assert(result === expectedValue, 'Test failed');
-    return 'Tests passed!';
-}" rows="15"></textarea>
+                        <div id="test-code-editor" class="monaco-editor"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Onglet Tests -->
+        <div id="testing-tab" class="tab-content">
+            <div class="testing-container">
+                <div class="testing-header">
+                    <h2>Tests de fonction</h2>
+                    <div class="testing-actions">
+                        <select id="function-select" onchange="loadFunctionForTesting()">
+                            <option value="">Sélectionner une fonction</option>
+                        </select>
+                        <button onclick="runTest()" class="btn btn-primary">🚀 Exécuter</button>
                     </div>
                 </div>
 
-                <div class="test-results" id="test-results" style="display: none;">
-                    <h3>Résultats des tests</h3>
-                    <pre id="test-output"></pre>
+                <div class="testing-panels">
+                    <div class="panel">
+                        <h3>Paramètres de test</h3>
+                        <div id="test-inputs" class="test-inputs">
+                            <!-- Les champs de paramètres seront générés ici -->
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <h3>Résultats</h3>
+                        <div id="test-results" class="test-results">
+                            <p class="no-results">Aucun test exécuté</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="function-preview">
+                    <h3>Aperçu de la fonction</h3>
+                    <div id="function-preview-editor" class="monaco-editor-small"></div>
                 </div>
             </div>
         </div>
