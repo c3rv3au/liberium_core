@@ -1,199 +1,178 @@
 // moleculer.config.js
 "use strict";
 
-module.exports = {
-	// Nom de l'espace de noms du broker
-	namespace: "liberium-core",
-	
-	// Nom unique du nœud
+const os = require("os");
+const fs = require("fs");
+
+// Détecter si on est dans Kubernetes
+const isKubernetes = process.env.KUBERNETES_SERVICE_HOST || 
+                    fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token');
+
+// Configuration de base
+const baseConfig = {
+	namespace: process.env.NAMESPACE || "liberium-core",
 	nodeID: null,
-	
-	// Configuration du métadonnées du nœud
 	metadata: {},
 	
-	// Configuration du logger
 	logger: {
 		type: "Console",
 		options: {
-			// Couleurs activées par défaut dans les logs
-			colors: true,
-			
-			// Module name que sera écrit au début des lignes de log
+			colors: !isKubernetes, // Pas de couleurs en prod K8s
 			moduleColors: false,
-			
-			// Formatage des logs
 			formatter: "full",
-			
-			// Séparateur d'objet pour l'affichage JSON
 			objectPrinter: null,
-			
-			// Auto-padding du nom de module
 			autoPadding: false
 		}
 	},
 	
-	// Niveau de log par défaut
-	logLevel: "info",
+	logLevel: process.env.LOG_LEVEL || (process.env.NODE_ENV === "production" ? "info" : "debug"),
 	
-	// Configuration du transporter pour la communication entre nœuds
+	serializer: "JSON",
+	requestTimeout: 10 * 1000,
+	
+	retryPolicy: {
+		enabled: true,
+		retries: 3,
+		delay: 100,
+		maxDelay: 1000,
+		factor: 2,
+		check: err => err && !!err.retryable
+	},
+	
+	maxCallLevel: 100,
+	heartbeatInterval: 10,
+	heartbeatTimeout: 30,
+	
+	contextParamsCloning: false,
+	maxEventListeners: 100,
+	
+	bulkhead: {
+		enabled: false,
+		concurrency: 10,
+		maxQueueSize: 50,
+	},
+	
+	registry: {
+		strategy: "RoundRobin",
+		preferLocal: true
+	},
+	
+	circuitBreaker: {
+		enabled: false,
+		threshold: 0.5,
+		windowTime: 60000,
+		minRequestCount: 20,
+		halfOpenTime: 10000
+	},
+	
+	balancer: {
+		preferLocal: true
+	},
+	
+	metrics: {
+		enabled: false
+	},
+	
+	tracing: {
+		enabled: false
+	},
+	
+	statistics: false,
+	validation: true,
+	validator: true,
+	errorHandler: null,
+	middlewares: [],
+	
+	created(broker) {
+		broker.logger.info("Broker created", {
+			nodeID: broker.nodeID,
+			namespace: broker.namespace,
+			environment: isKubernetes ? "kubernetes" : "local",
+			hostname: os.hostname()
+		});
+	},
+	
+	started(broker) {
+		broker.logger.info("Moleculer broker started successfully", {
+			nodeID: broker.nodeID,
+			namespace: broker.namespace,
+			environment: isKubernetes ? "kubernetes" : "local"
+		});
+	},
+	
+	stopped(broker) {
+		broker.logger.info("Moleculer broker stopped");
+	}
+};
+
+// Configuration spécifique Kubernetes
+const kubernetesConfig = {
+	...baseConfig,
+	
+	// NodeID unique en K8s
+	nodeID: process.env.HOSTNAME || `node-${os.hostname()}-${process.pid}`,
+	
+	// Transporter optimisé pour K8s
 	transporter: {
 		type: "TCP",
 		options: {
-			// Port UDP pour la découverte automatique des nœuds
+			udpDiscovery: true,
+			udpPort: 4445,
+			udpBindAddress: "0.0.0.0",
+			udpPeriod: 30,
+			udpReuseAddr: true,
+			port: 4000,
+			urls: process.env.MOLECULER_URLS ? 
+				process.env.MOLECULER_URLS.split(",") : [],
+			maxConnections: 32,
+			maxPacketSize: 1024 * 1024
+		}
+	},
+	
+	cacher: {
+		type: "Memory",
+		options: {
+			max: 100,
+			ttl: 30,
+			clone: true
+		}
+	},
+	
+	// Circuit breaker activé en K8s
+	circuitBreaker: {
+		enabled: true,
+		threshold: 0.5,
+		windowTime: 60000,
+		minRequestCount: 20,
+		halfOpenTime: 10000
+	}
+};
+
+// Configuration locale (développement)
+const localConfig = {
+	...baseConfig,
+	
+	// Transporter TCP local
+	transporter: {
+		type: "TCP",
+		options: {
 			udpDiscovery: true,
 			udpPort: 4445,
 			udpBindAddress: null,
 			udpPeriod: 30,
-			
-			// Port TCP pour la communication
 			port: 4000,
 			urls: []
 		}
 	},
 	
-	// Configuration du système de mise en cache
 	cacher: {
 		type: "Memory",
 		options: {
-			// Taille maximum du cache
 			max: 100,
-			// TTL par défaut en secondes
 			ttl: 30
 		}
-	},
-	
-	// Configuration du serializer pour les messages
-	serializer: "JSON",
-	
-	// Configuration du request timeout en millisecondes
-	requestTimeout: 10 * 1000,
-	
-	// Retry policy settings
-	retryPolicy: {
-		// Activation de la politique de retry
-		enabled: false,
-		// Nombre de tentatives
-		retries: 5,
-		// Délai entre les tentatives en ms
-		delay: 100,
-		// Multiplicateur de délai
-		maxDelay: 1000,
-		// Facteur d'expansion du délai
-		factor: 2,
-		// Vérifier si l'erreur est retriable
-		check: err => err && !!err.retryable
-	},
-	
-	// Configuration du maximum de paramètres
-	maxCallLevel: 100,
-	
-	// Configuration du heartbeat
-	heartbeatInterval: 10,
-	heartbeatTimeout: 30,
-	
-	// Configuration du contexte de tracking
-	contextParamsCloning: false,
-	
-	// Configuration du maximum d'événements
-	maxEventListeners: 100,
-	
-	// Configuration de bulkhead (isolement de circuit)
-	bulkhead: {
-		// Activation du bulkhead
-		enabled: false,
-		// Nombre maximum de requêtes concurrentes
-		concurrency: 10,
-		// Nombre maximum de requêtes en attente
-		maxQueueSize: 50,
-	},
-	
-	// Configuration du registry pour la découverte de services
-	registry: {
-		// Stratégie de découverte
-		strategy: "RoundRobin",
-		// Préféreur de stratégie
-		preferLocal: true
-	},
-	
-	// Configuration du circuit breaker
-	circuitBreaker: {
-		// Activation du circuit breaker
-		enabled: false,
-		// Seuil de défaillance (0.5 = 50%)
-		threshold: 0.5,
-		// Délai de récupération en ms
-		windowTime: 60000,
-		// Nombre minimum de requêtes avant évaluation
-		minRequestCount: 20,
-		// Délai avant half-open state en ms
-		halfOpenTime: 10000
-	},
-	
-	// Configuration du load balancing
-	balancer: {
-		// Préférer les nœuds locaux
-		preferLocal: true
-	},
-	
-	// Configuration des métriques
-	metrics: {
-		enabled: false,
-		reporter: {
-			type: "Prometheus",
-			options: {
-				port: 3030,
-				path: "/metrics",
-				defaultLabels: registry => ({
-					namespace: registry.broker.namespace,
-					nodeID: registry.broker.nodeID
-				})
-			}
-		}
-	},
-	
-	// Configuration du tracing
-	tracing: {
-		enabled: false,
-		exporter: {
-			type: "Console",
-			options: {
-				// Log avec couleurs
-				colors: true,
-				// Largeur des colonnes
-				width: 100,
-				// Format de timestamp
-				gaugeWidth: 40
-			}
-		}
-	},
-	
-	// Désactiver les statistiques internes par défaut
-	statistics: false,
-	
-	// Paramètres de validation
-	validation: true,
-	
-	// Configuration du validator
-	validator: true,
-	
-	// Configuration de l'errorHandler
-	errorHandler: null,
-	
-	// Configuration des middlewares
-	middlewares: [],
-	
-	// Configuration des hook du cycle de vie
-	created(broker) {
-		// Appelé après la création du broker
-	},
-	
-	started(broker) {
-		// Appelé après le démarrage du broker
-		broker.logger.info("Moleculer broker started successfully");
-	},
-	
-	stopped(broker) {
-		// Appelé après l'arrêt du broker
-		broker.logger.info("Moleculer broker stopped");
 	}
 };
+
+// Exporter la configuration appropriée
+module.exports = isKubernetes ? kubernetesConfig : localConfig;

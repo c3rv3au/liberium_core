@@ -1,0 +1,9 @@
+node_modules
+.git
+.vscode
+tmp
+backup
+package-lock.json
+data/*
+build/*
+deploy.yaml
