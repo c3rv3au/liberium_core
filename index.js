@@ -11,10 +11,8 @@ const path = require("path");
 class ServiceLauncher {
 	constructor() {
 		this.availableServices = {
-			"coderdb": "./services/coderdb.service.js",
 			"etcd": "./services/etcd.service.js", 
 			"api": "./services/api.service.js",
-			"web": "./services/web.service.js" // Si vous voulez ajouter un service web séparé
 		};
 		
 		this.broker = null;
@@ -37,11 +35,11 @@ class ServiceLauncher {
 		const invalidServices = [];
 
 		for (const service of requestedServices) {
-			if (this.availableServices[service]) {
+			//if (this.availableServices[service]) {
 				validServices.push(service);
-			} else {
-				invalidServices.push(service);
-			}
+			//} else {
+			//	invalidServices.push(service);
+			//}
 		}
 
 		if (invalidServices.length > 0) {
@@ -76,7 +74,7 @@ class ServiceLauncher {
 		console.log(`[ServiceLauncher] Chargement des services: ${services.join(", ")}`);
 		
 		for (const serviceName of services) {
-			const servicePath = this.availableServices[serviceName];
+			const servicePath = "./services/" + serviceName + ".service.js";
 			
 			try {
 				console.log(`[ServiceLauncher] Chargement de ${serviceName} depuis ${servicePath}`);

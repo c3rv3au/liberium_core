@@ -8,6 +8,16 @@ const fs = require("fs");
 const isKubernetes = process.env.KUBERNETES_SERVICE_HOST || 
                     fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token');
 
+function getLocalUrl() {
+	const url = [];
+	return url;
+	
+	if (process.env.DISCOVERY_URL) {
+		url.push(process.env.DISCOVERY_URL);
+	}
+	return url;
+}
+
 // Fonction pour générer les URLs des peers dans un StatefulSet avec nodeID
 function generateStatefulSetPeerUrls() {
 	const podName = process.env.POD_NAME;
@@ -237,7 +247,7 @@ const localConfig = {
 			udpDiscovery: true,
 			udpPort: 4445,
 			udpPeriod: 30,
-			urls: [],
+			urls: getLocalUrl(),
 			maxReconnectAttempts: 5,
 			reconnectDelay: 1000
 		}
@@ -256,6 +266,7 @@ if (isKubernetes) {
 	console.log("Total peers configured:", peerUrls.length);
 } else {
 	console.log("Using local development configuration");
+	console.log("Peer URLs:", getLocalUrl());
 	console.log("Node ID:", `local-${os.hostname()}-${process.pid}`);
 }
 
