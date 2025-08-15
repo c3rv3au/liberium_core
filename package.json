@@ -1,12 +1,16 @@
 {
   "name": "liberium-core",
-  "version": "0.1.1",
+  "version": "0.1.8",
   "description": "Projet Liberium - Blockchain",
-  "main": "services/coderdb.service.js",
+  "main": "index.js",
   "scripts": {
-    "start": "moleculer-runner services/coderdb.service.js",
-    "dev": "moleculer-runner --hot services/coderdb.service.js", 
-    "web": "moleculer-runner --hot services/coderdb.service.js services/etcd.service.js services/api.service.js",
+    "start": "node index.js",
+    "dev": "SERVICES=coderdb,api LOG_LEVEL=debug node index.js",
+    "web": "SERVICES=coderdb,etcd,api node index.js",
+    "etcd": "SERVICES=etcd node index.js",
+    "api": "SERVICES=api node index.js",
+    "coderdb": "SERVICES=coderdb node index.js",
+    "all": "SERVICES=coderdb,etcd,api node index.js",
     "test": "jest",
     "example": "node example/usage.js"
   },

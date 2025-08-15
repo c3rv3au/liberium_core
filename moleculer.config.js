@@ -23,7 +23,7 @@ function generateStatefulSetPeerUrls() {
 		for (let i = 0; i < replicas; i++) {
 			const peerPodName = `${statefulSetName}-${i}`;
 			if (peerPodName !== podName) {
-				urls.push(`tcp://${peerPodName}.${headlessService}.${namespace}.svc.cluster.local:4000`);
+				urls.push(`${peerPodName}.${headlessService}.${namespace}.svc.cluster.local:4000`);
 			}
 		}
 	}
@@ -31,10 +31,24 @@ function generateStatefulSetPeerUrls() {
 	return urls;
 }
 
+// Fonction pour générer un NodeID stable basé sur le pod
+function generateNodeId() {
+	const podName = process.env.POD_NAME;
+	const namespace = process.env.POD_NAMESPACE || 'brain-prod';
+	
+	if (podName) {
+		// Utiliser le nom du pod comme base pour l'ID
+		return `${podName}.${namespace}`;
+	}
+	
+	// Fallback pour le développement local
+	return `local-${os.hostname()}-${process.pid}`;
+}
+
 // Configuration de base
 const baseConfig = {
 	namespace: process.env.NAMESPACE || "liberium-core",
-	nodeID: null,
+	nodeID: generateNodeId(),
 	metadata: {
 		hostname: os.hostname(),
 		pid: process.pid,
