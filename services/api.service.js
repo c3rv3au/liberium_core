@@ -2,11 +2,14 @@
 "use strict";
 
 const { Service } = require("moleculer");
+const BaseService = require("./base.service");
 const http = require("http");
 const url = require("url");
 
 module.exports = {
 	name: "api",
+
+	mixins: [BaseService],
 
 	settings: {
 		port: process.env.API_PORT || 3001,
@@ -53,6 +56,42 @@ module.exports = {
 			// Toutes les routes commencent par /brain/
 			if (!pathname.startsWith("/brain/")) {
 				return this.sendError(res, 404, "Not Found");
+			}
+
+			if (pathname === "/brain/debug") {
+				const nodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
+				const allNodes = await this.broker.registry.getNodeList({ onlyAvailable: false });
+				
+				// Obtenir aussi les services directement du broker
+				const brokerServices = this.broker.registry.getServiceList({ 
+					onlyLocal: false, 
+					onlyAvailable: true 
+				});
+				
+				const nodeDetails = nodes.map(node => ({
+					id: node.id,
+					available: node.available,
+					local: node.local,
+					lastHeartbeatTime: node.lastHeartbeatTime,
+					servicesRaw: node.services, // Structure brute
+					servicesCount: node.services ? node.services.length : 0,
+					servicesNames: node.services ? node.services.map(s => {
+						if (typeof s === 'string') return s;
+						if (s && s.name) return s.name;
+						if (s && s.fullName) return s.fullName;
+						return JSON.stringify(s);
+					}) : []
+				}));
+				
+				return this.sendJson(res, 200, {
+					totalNodes: allNodes.length,
+					availableNodes: nodes.length,
+					brokerNodeId: this.broker.nodeID,
+					namespace: this.broker.namespace,
+					brokerServices: brokerServices.map(s => s.name),
+					nodes: nodeDetails,
+					timestamp: new Date().toISOString()
+				});
 			}
 
 			// Routes spéciales gérées directement par l'API
@@ -293,20 +332,24 @@ module.exports = {
 		 */
 		async getAvailableServices() {
 			try {
-				const nodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
-				const services = new Set();
-
-				nodes.forEach(node => {
-					if (node.services && Array.isArray(node.services)) {
-						node.services.forEach(service => {
-							if (service && service.name) {
-								services.add(service.name);
-							}
-						});
-					}
+				this.logger.info("Getting available services...");
+				
+				// Utiliser directement getServiceList au lieu de parcourir les nœuds
+				const services = this.broker.registry.getServiceList({ 
+					onlyLocal: false, 
+					onlyAvailable: true 
 				});
-
-				return Array.from(services);
+				
+				this.logger.info(`Found ${services.length} services`);
+				
+				const serviceNames = services
+					.map(service => service.name)
+					.filter(name => name !== '$node') // Exclure le service système
+					.sort();
+				
+				this.logger.info(`Available services: ${serviceNames.join(', ')}`);
+				
+				return serviceNames;
 			} catch (err) {
 				this.logger.error("Error getting available services:", err);
 				return [];
