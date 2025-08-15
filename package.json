@@ -6,7 +6,7 @@
   "scripts": {
     "start": "moleculer-runner services/coderdb.service.js",
     "dev": "moleculer-runner --hot services/coderdb.service.js", 
-    "web": "moleculer-runner --hot services/coderdb.service.js services/web/web-interface.service.js",
+    "web": "moleculer-runner --hot services/coderdb.service.js services/api.service.js",
     "test": "jest",
     "example": "node example/usage.js"
   },
