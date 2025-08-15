@@ -2,6 +2,7 @@
 "use strict";
 
 const { Service } = require("moleculer");
+const BaseService = require("./base.service");
 const Storage = require("./storage/local-storage");
 const Election = require("./election/master-election");
 const FunctionValidator = require("./validators/function-validator");
@@ -9,7 +10,7 @@ const FunctionValidator = require("./validators/function-validator");
 module.exports = {
 	name: "coderdb",
 
-	mixins: [Storage, Election],
+	mixins: [BaseService, Storage, Election],
 
 	settings: {
 		dbPath: "./data/coderdb",

@@ -2,13 +2,14 @@
 "use strict";
 
 const { Service } = require("moleculer");
+const BaseService = require("./base.service");
 const EtcdStorage = require("./storage/etcd-storage");
 const EtcdElection = require("./election/etcd-election");
 
 module.exports = {
 	name: "etcd",
 
-	mixins: [EtcdStorage, EtcdElection],
+	mixins: [BaseService, EtcdStorage, EtcdElection],
 
 	settings: {
 		dbPath: "./data/etcd",
