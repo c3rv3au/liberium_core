@@ -1,4 +1,4 @@
-// services/api/api.service.js
+// services/api.service.js
 "use strict";
 
 const { Service } = require("moleculer");
@@ -53,6 +53,29 @@ module.exports = {
 			// Toutes les routes commencent par /brain/
 			if (!pathname.startsWith("/brain/")) {
 				return this.sendError(res, 404, "Not Found");
+			}
+
+			// Routes spéciales gérées directement par l'API
+			if (pathname === "/brain/services") {
+				const services = await this.getAvailableServices();
+				return this.sendJson(res, 200, {
+					services,
+					count: services.length,
+					timestamp: new Date().toISOString()
+				});
+			}
+
+			if (pathname === "/brain/health") {
+				const services = await this.getAvailableServices();
+				return this.sendJson(res, 200, {
+					status: "healthy",
+					timestamp: new Date().toISOString(),
+					uptime: process.uptime(),
+					nodeId: this.broker.nodeID,
+					availableServices: services,
+					memoryUsage: process.memoryUsage(),
+					version: require("../package.json").version
+				});
 			}
 
 			// Router automatiquement vers les services
@@ -147,7 +170,7 @@ module.exports = {
 			const alternatives = [];
 
 			// Conventions REST standards
-							switch (method) {
+			switch (method) {
 				case "GET":
 					if (segments.length === 1) {
 						// GET /brain/functions -> functions.list
@@ -329,40 +352,6 @@ module.exports = {
 				timestamp: new Date().toISOString(),
 				statusCode
 			});
-		}
-	},
-
-	actions: {
-		/**
-		 * Lister tous les services disponibles
-		 */
-		services: {
-			async handler(ctx) {
-				const services = await this.getAvailableServices();
-				return {
-					services,
-					count: services.length,
-					timestamp: new Date().toISOString()
-				};
-			}
-		},
-
-		/**
-		 * Obtenir les informations de santé de l'API gateway
-		 */
-		health: {
-			async handler(ctx) {
-				const services = await this.getAvailableServices();
-				return {
-					status: "healthy",
-					timestamp: new Date().toISOString(),
-					uptime: process.uptime(),
-					nodeId: this.broker.nodeID,
-					availableServices: services,
-					memoryUsage: process.memoryUsage(),
-					version: require("../../package.json").version
-				};
-			}
 		}
 	},
 
