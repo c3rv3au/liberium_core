@@ -8,16 +8,44 @@ const fs = require("fs");
 const isKubernetes = process.env.KUBERNETES_SERVICE_HOST || 
                     fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token');
 
+// Fonction pour générer les URLs des peers dans un StatefulSet
+function generateStatefulSetPeerUrls() {
+	const podName = process.env.POD_NAME;
+	const headlessService = process.env.HEADLESS_SERVICE || 'liberium-core-headless';
+	const namespace = process.env.POD_NAMESPACE || 'brain-prod';
+	const replicas = parseInt(process.env.REPLICAS || '3');
+	const statefulSetName = process.env.STATEFULSET_NAME || 'liberium-core';
+	
+	const urls = [];
+	
+	if (podName) {
+		// Générer les URLs de tous les autres pods du StatefulSet
+		for (let i = 0; i < replicas; i++) {
+			const peerPodName = `${statefulSetName}-${i}`;
+			if (peerPodName !== podName) {
+				urls.push(`tcp://${peerPodName}.${headlessService}.${namespace}.svc.cluster.local:4000`);
+			}
+		}
+	}
+	
+	return urls;
+}
+
 // Configuration de base
 const baseConfig = {
 	namespace: process.env.NAMESPACE || "liberium-core",
 	nodeID: null,
-	metadata: {},
+	metadata: {
+		hostname: os.hostname(),
+		pid: process.pid,
+		podIP: process.env.POD_IP,
+		podName: process.env.POD_NAME
+	},
 	
 	logger: {
 		type: "Console",
 		options: {
-			colors: !isKubernetes, // Pas de couleurs en prod K8s
+			colors: !isKubernetes,
 			moduleColors: false,
 			formatter: "full",
 			objectPrinter: null,
@@ -28,20 +56,20 @@ const baseConfig = {
 	logLevel: process.env.LOG_LEVEL || (process.env.NODE_ENV === "production" ? "info" : "debug"),
 	
 	serializer: "JSON",
-	requestTimeout: 10 * 1000,
+	requestTimeout: 15 * 1000,
 	
 	retryPolicy: {
 		enabled: true,
-		retries: 3,
+		retries: 5,
 		delay: 100,
-		maxDelay: 1000,
+		maxDelay: 2000,
 		factor: 2,
 		check: err => err && !!err.retryable
 	},
 	
 	maxCallLevel: 100,
-	heartbeatInterval: 10,
-	heartbeatTimeout: 30,
+	heartbeatInterval: 3,
+	heartbeatTimeout: 10,
 	
 	contextParamsCloning: false,
 	maxEventListeners: 100,
@@ -58,10 +86,10 @@ const baseConfig = {
 	},
 	
 	circuitBreaker: {
-		enabled: false,
+		enabled: true,
 		threshold: 0.5,
 		windowTime: 60000,
-		minRequestCount: 20,
+		minRequestCount: 5,
 		halfOpenTime: 10000
 	},
 	
@@ -77,6 +105,7 @@ const baseConfig = {
 		enabled: false
 	},
 	
+	cacher: false,
 	statistics: false,
 	validation: true,
 	validator: true,
@@ -88,7 +117,9 @@ const baseConfig = {
 			nodeID: broker.nodeID,
 			namespace: broker.namespace,
 			environment: isKubernetes ? "kubernetes" : "local",
-			hostname: os.hostname()
+			hostname: os.hostname(),
+			podIP: process.env.POD_IP,
+			podName: process.env.POD_NAME
 		});
 	},
 	
@@ -96,8 +127,22 @@ const baseConfig = {
 		broker.logger.info("Moleculer broker started successfully", {
 			nodeID: broker.nodeID,
 			namespace: broker.namespace,
-			environment: isKubernetes ? "kubernetes" : "local"
+			environment: isKubernetes ? "kubernetes" : "local",
+			podName: process.env.POD_NAME
 		});
+		
+		// Afficher les services et nœuds après initialisation
+		setTimeout(() => {
+			try {
+				const nodes = broker.registry.getNodeList({ onlyAvailable: true });
+				broker.logger.info("Available nodes:", {
+					count: nodes.length,
+					nodes: nodes.map(n => ({ id: n.id, available: n.available }))
+				});
+			} catch (err) {
+				broker.logger.warn("Could not list nodes:", err.message);
+			}
+		}, 5000);
 	},
 	
 	stopped(broker) {
@@ -105,46 +150,43 @@ const baseConfig = {
 	}
 };
 
-// Configuration spécifique Kubernetes
+// Configuration spécifique Kubernetes StatefulSet
 const kubernetesConfig = {
 	...baseConfig,
 	
-	// NodeID unique en K8s
-	nodeID: process.env.HOSTNAME || `node-${os.hostname()}-${process.pid}`,
+	// NodeID basé sur le nom du pod pour la consistance
+	nodeID: process.env.POD_NAME || `node-${os.hostname()}-${process.pid}`,
 	
-	// Transporter optimisé pour K8s
+	// Transporter TCP optimisé pour StatefulSet
 	transporter: {
 		type: "TCP",
 		options: {
+			// Écouter sur toutes les interfaces
+			host: "0.0.0.0",
+			port: 4000,
+			
+			// Découverte UDP activée
 			udpDiscovery: true,
 			udpPort: 4445,
 			udpBindAddress: "0.0.0.0",
-			udpPeriod: 30,
+			udpPeriod: 5,
 			udpReuseAddr: true,
-			port: 4000,
-			urls: process.env.MOLECULER_URLS ? 
-				process.env.MOLECULER_URLS.split(",") : [],
+			udpMaxDiscoveryHops: 3,
+			
+			// URLs des peers StatefulSet
+			urls: generateStatefulSetPeerUrls(),
+			
+			// Options de connexion optimisées
 			maxConnections: 32,
-			maxPacketSize: 1024 * 1024
+			maxPacketSize: 1024 * 1024,
+			maxReconnectAttempts: 20,
+			reconnectDelay: 1000,
+			reconnectDelayMax: 10000,
+			
+			// Timeouts plus agressifs pour détecter les déconnexions
+			connectionTimeout: 5000,
+			packetLogLevel: "debug"
 		}
-	},
-	
-	cacher: {
-		type: "Memory",
-		options: {
-			max: 100,
-			ttl: 30,
-			clone: true
-		}
-	},
-	
-	// Circuit breaker activé en K8s
-	circuitBreaker: {
-		enabled: true,
-		threshold: 0.5,
-		windowTime: 60000,
-		minRequestCount: 20,
-		halfOpenTime: 10000
 	}
 };
 
@@ -152,27 +194,30 @@ const kubernetesConfig = {
 const localConfig = {
 	...baseConfig,
 	
+	nodeID: `local-${os.hostname()}-${process.pid}`,
+	
 	// Transporter TCP local
 	transporter: {
 		type: "TCP",
 		options: {
+			port: 4000,
 			udpDiscovery: true,
 			udpPort: 4445,
-			udpBindAddress: null,
-			udpPeriod: 30,
-			port: 4000,
+			udpPeriod: 10,
 			urls: []
-		}
-	},
-	
-	cacher: {
-		type: "Memory",
-		options: {
-			max: 100,
-			ttl: 30
 		}
 	}
 };
+
+// Log de la configuration utilisée
+if (isKubernetes) {
+	console.log("Using Kubernetes StatefulSet configuration");
+	console.log("Pod Name:", process.env.POD_NAME);
+	console.log("Pod IP:", process.env.POD_IP);
+	console.log("Peer URLs:", generateStatefulSetPeerUrls());
+} else {
+	console.log("Using local development configuration");
+}
 
 // Exporter la configuration appropriée
 module.exports = isKubernetes ? kubernetesConfig : localConfig;
