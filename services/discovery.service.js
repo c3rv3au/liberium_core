@@ -151,13 +151,13 @@ module.exports = {
 				// URLs des nœuds internes (Kubernetes)
 				const internalNodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
 				
-				// Stratégie 1: URLs directes des pods (IP pod + port 3001)
+				// Stratégie 1: URLs directes des pods (IP pod + port 4000)
 				for (const node of internalNodes) {
 					if (node.id !== this.broker.nodeID) {
 						const podIP = this.getPodIPFromNode(node);
 						if (podIP) {
-							urls.push(`${podIP}:3001/${node.id}`);
-							this.logger.debug(`Added pod direct URL: ${podIP}:3001/${node.id}`);
+							urls.push(`${podIP}:4000/${node.id}`);
+							this.logger.debug(`Added pod direct URL: ${podIP}:4000/${node.id}`);
 						}
 					}
 				}
