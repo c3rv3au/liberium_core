@@ -139,14 +139,15 @@ class ServiceLauncher {
 			console.log(`✅ ${service.toUpperCase()}`);
 		});
 		
+		/*
 		if (services.includes("api")) {
 			console.log("\n📡 API disponible sur:");
 			console.log(`   http://localhost:${process.env.API_PORT || 3001}/brain/health`);
-		}
-		
+		}		
 		console.log(`\n🔧 Node ID: ${this.broker.nodeID}`);
 		console.log(`🏷️  Namespace: ${this.broker.namespace}`);
 		console.log("=".repeat(50) + "\n");
+		*/
 	}
 
 	/**

@@ -226,13 +226,13 @@ module.exports = {
 
 	events: {
 		"$node.connected"(payload) {
-			this.logger.info(`Node connected: ${payload.node.id}`);
+			//this.logger.info(`Node connected: ${payload.node.id}`);
 			// Démarrer l'élection si on détecte un autre service etcd
 			setTimeout(() => this.checkForEtcdPeers(), 1000);
 		},
 
 		"$node.disconnected"(payload) {
-			this.logger.info(`Node disconnected: ${payload.node.id}`);
+			//this.logger.info(`Node disconnected: ${payload.node.id}`);
 			if (payload.node.id === this.masterId) {
 				this.logger.warn("Master node disconnected, triggering election");
 				this.triggerElection();
