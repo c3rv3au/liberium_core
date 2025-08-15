@@ -131,7 +131,6 @@ const baseConfig = {
 	validation: true,
 	validator: true,
 	errorHandler: null,
-	middlewares: [],
 	
 	created(broker) {
 		broker.logger.info("Broker created", {
