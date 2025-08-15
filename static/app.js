@@ -96,7 +96,7 @@ class CoderDBInterface {
                 options.body = JSON.stringify(data);
             }
 
-            const response = await fetch(`/api${endpoint}`, options);
+            const response = await fetch(`/brain${endpoint}`, options);
             const result = await response.json();
 
             if (!response.ok) {
