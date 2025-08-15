@@ -151,55 +151,70 @@ module.exports = {
 				// URLs des nœuds internes (Kubernetes)
 				const internalNodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
 				
-				// Méthode 1: Utiliser l'URL publique de discovery si configurée
-				const discoveryPublicUrl = process.env.DISCOVERY_PUBLIC_URL;
-				if (discoveryPublicUrl) {
-					const discoveryHost = discoveryPublicUrl.replace(/^https?:\/\//, '').split(':')[0];
-					const discoveryPort = process.env.DISCOVERY_PUBLIC_PORT || '4000';
-					
-					for (const node of internalNodes) {
-						if (node.id !== this.broker.nodeID) {
-							urls.push(`${discoveryHost}:${discoveryPort}/${node.id}`);
+				// Stratégie 1: URLs directes des pods (IP pod + port 3001)
+				for (const node of internalNodes) {
+					if (node.id !== this.broker.nodeID) {
+						const podIP = this.getPodIPFromNode(node);
+						if (podIP) {
+							urls.push(`${podIP}:3001/${node.id}`);
+							this.logger.debug(`Added pod direct URL: ${podIP}:3001/${node.id}`);
 						}
 					}
-				} else {
-					// Méthode 2: Utiliser directement les IPs des pods (si accessibles depuis l'extérieur)
-					for (const node of internalNodes) {
-						if (node.id !== this.broker.nodeID) {
-							// Essayer d'obtenir l'IP du pod
-							const podIP = this.getPodIPFromNode(node);
-							if (podIP) {
-								urls.push(`${podIP}:4000/${node.id}`);
-							} else if (node.hostname) {
-								// Fallback: utiliser hostname si IP pod non disponible
-								urls.push(`${node.hostname}:4000/${node.id}`);
+				}
+				
+				// Stratégie 2: Si pas d'IP pod disponible, utiliser le LoadBalancer avec port 4000
+				// (seulement si aucune URL directe n'a été trouvée)
+				if (urls.length === 0) {
+					const discoveryPublicUrl = process.env.DISCOVERY_PUBLIC_URL;
+					const discoveryPort = process.env.DISCOVERY_PUBLIC_PORT || '4000'; // Port TCP, pas HTTP
+					
+					if (discoveryPublicUrl) {
+						for (const node of internalNodes) {
+							if (node.id !== this.broker.nodeID) {
+								// Utiliser le port TCP 4000, pas le port HTTP 80
+								urls.push(`${discoveryPublicUrl}:${discoveryPort}/${node.id}`);
+								this.logger.debug(`Added loadbalancer URL: ${discoveryPublicUrl}:${discoveryPort}/${node.id}`);
 							}
 						}
 					}
 				}
 				
-				// URLs des nœuds externes (autres VMs)
+				// URLs des nœuds externes (autres VMs/services)
 				const externalNodes = Array.from(this.externalNodes.values())
 					.filter(node => this.isNodeAlive(node));
 				
 				for (const node of externalNodes) {
 					urls.push(node.url);
+					this.logger.debug(`Added external node URL: ${node.url}`);
 				}
+				
+				const method = urls.length > 0 && urls[0].includes(process.env.DISCOVERY_PUBLIC_URL) 
+					? "loadbalancer" 
+					: "direct-pod-ip";
 				
 				this.logger.info(`Generated ${urls.length} bootstrap URLs`, { 
 					urls,
-					method: discoveryPublicUrl ? "loadbalancer" : "direct-pod-ip",
+					method,
 					internalNodesCount: internalNodes.length - 1,
-					externalNodesCount: externalNodes.length
+					externalNodesCount: externalNodes.length,
+					discoveryPublicUrl: process.env.DISCOVERY_PUBLIC_URL
 				});
 				
 				return {
 					urls,
 					count: urls.length,
-					discoveryPublicUrl: discoveryPublicUrl || null,
-					internalNodesCount: internalNodes.length - 1, // -1 pour exclure ce nœud
+					discoveryPublicUrl: process.env.DISCOVERY_PUBLIC_URL || null,
+					internalNodesCount: internalNodes.length - 1,
 					externalNodesCount: externalNodes.length,
-					method: discoveryPublicUrl ? "loadbalancer" : "direct-pod-ip"
+					method,
+					debug: {
+						internalNodes: internalNodes.map(node => ({
+							id: node.id,
+							podIP: this.getPodIPFromNode(node),
+							hostname: node.hostname,
+							metadata: node.metadata
+						}))
+					}
 				};
 			}
 		},
@@ -245,7 +260,7 @@ module.exports = {
 	},
 
 	methods: {
-        /**
+		/**
 		 * Détecter si on est dans Kubernetes
 		 */
 		isKubernetes() {
@@ -253,6 +268,7 @@ module.exports = {
 					  process.env.POD_NAME || 
 					  process.env.POD_NAMESPACE);
 		},
+
 		/**
 		 * Vérifier si un nœud externe est encore vivant
 		 */
@@ -292,10 +308,9 @@ module.exports = {
 		 * Extraire l'IP du pod depuis les métadonnées du nœud
 		 */
 		getPodIPFromNode(node) {
-			// Essayer plusieurs sources pour l'IP du pod
-			
 			// 1. IP du pod depuis les métadonnées Moleculer
 			if (node.metadata && node.metadata.podIP) {
+				this.logger.debug(`Found podIP in metadata: ${node.metadata.podIP}`, { nodeId: node.id });
 				return node.metadata.podIP;
 			}
 			
@@ -303,7 +318,8 @@ module.exports = {
 			if (node.ipList && node.ipList.length > 0) {
 				// Prendre la première IP non-loopback
 				for (const ip of node.ipList) {
-					if (ip !== "127.0.0.1" && ip !== "::1") {
+					if (ip !== "127.0.0.1" && ip !== "::1" && this.isValidIP(ip)) {
+						this.logger.debug(`Found IP in ipList: ${ip}`, { nodeId: node.id });
 						return ip;
 					}
 				}
@@ -311,13 +327,28 @@ module.exports = {
 			
 			// 3. Essayer d'extraire depuis le hostname si c'est une IP
 			if (node.hostname && this.isValidIP(node.hostname)) {
+				this.logger.debug(`Found IP in hostname: ${node.hostname}`, { nodeId: node.id });
 				return node.hostname;
 			}
 			
-			// 4. Si le nodeID contient l'IP (selon votre configuration)
+			// 4. Si le nodeID contient l'IP
 			if (this.isValidIP(node.id)) {
+				this.logger.debug(`Found IP in nodeID: ${node.id}`, { nodeId: node.id });
 				return node.id;
 			}
+			
+			// 5. Essayer d'extraire l'IP depuis les informations de transporter
+			if (node.client && node.client.host && this.isValidIP(node.client.host)) {
+				this.logger.debug(`Found IP in client.host: ${node.client.host}`, { nodeId: node.id });
+				return node.client.host;
+			}
+			
+			this.logger.warn(`Could not find IP for node ${node.id}`, {
+				hostname: node.hostname,
+				ipList: node.ipList,
+				metadata: node.metadata,
+				client: node.client
+			});
 			
 			return null;
 		},
@@ -326,10 +357,12 @@ module.exports = {
 		 * Vérifier si une chaîne est une IP valide
 		 */
 		isValidIP(str) {
+			if (!str || typeof str !== 'string') return false;
+			
 			const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
 			const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
 			return ipv4Regex.test(str) || ipv6Regex.test(str);
-		},
+		}
 	},
 
 	/**
@@ -348,6 +381,7 @@ module.exports = {
 			nodeId: this.broker.nodeID,
 			isKubernetes: this.isKubernetes(),
 			discoveryPublicUrl: process.env.DISCOVERY_PUBLIC_URL,
+			discoveryPublicPort: process.env.DISCOVERY_PUBLIC_PORT,
 			nodeTTL: this.settings.nodeTTL
 		});
 		

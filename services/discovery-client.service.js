@@ -16,6 +16,8 @@ module.exports = {
 		heartbeatInterval: 30000,
 		// Intervalle de récupération des peers en ms
 		peerDiscoveryInterval: 60000,
+		// Tentatives de connexion aux nouveaux peers
+		connectionRetries: 3,
 		// Métadonnées à envoyer au discovery
 		metadata: {
 			environment: process.env.NODE_ENV || "production",
@@ -34,8 +36,6 @@ module.exports = {
 			}
 
 			return new Promise((resolve, reject) => {
-                console.log("url:", this.settings.discoveryUrl);
-                console.log("path:", path);
 				const url = new URL(path, this.settings.discoveryUrl);
 				
 				const options = {
@@ -51,7 +51,6 @@ module.exports = {
 
 				if (data) {
 					const body = JSON.stringify(data);
-                    console.log("data:", data);
 					options.headers["Content-Length"] = Buffer.byteLength(body);
 				}
 
@@ -161,7 +160,7 @@ module.exports = {
 		async getBootstrapUrls() {
 			try {
 				const result = await this.callDiscovery("/brain/discovery/getBootstrapUrls", "GET");
-				this.logger.info(`Retrieved ${result.urls.length} bootstrap URLs from discovery`);
+				this.logger.info(`Retrieved ${result.urls.length} bootstrap URLs from discovery`, result);
 				return result.urls;
 			} catch (err) {
 				this.logger.error("Failed to get bootstrap URLs:", err);
@@ -192,6 +191,11 @@ module.exports = {
 				return process.env.LOCAL_IP;
 			}
 
+			// Utiliser POD_IP si disponible (Kubernetes)
+			if (process.env.POD_IP) {
+				return process.env.POD_IP;
+			}
+
 			const os = require("os");
 			const interfaces = os.networkInterfaces();
 			
@@ -208,23 +212,128 @@ module.exports = {
 		},
 
 		/**
-		 * Mettre à jour la configuration du transporter avec les peers découverts
+		 * Ajouter des peers au transporter de manière compatible
 		 */
-		async updateTransporterPeers() {
+		async addPeerToTransporter(peerUrl) {
+			if (!this.broker.transporter) {
+				this.logger.warn("No transporter available to add peer");
+				return false;
+			}
+
+			try {
+				// Méthode 1: Si c'est un transporter TCP avec une méthode connect
+				if (this.broker.transporter.connect && typeof this.broker.transporter.connect === 'function') {
+					// Essayer de parser l'URL pour extraire host, port et nodeID
+					const [hostPort, nodeID] = peerUrl.split('/');
+					const [host, port] = hostPort.split(':');
+					
+					this.logger.debug(`Attempting to connect to peer: ${host}:${port} (${nodeID})`);
+					
+					// Utiliser la méthode connect du transporter
+					await this.broker.transporter.connect();
+					return true;
+				}
+
+				// Méthode 2: Essayer d'utiliser les options du transporter
+				if (this.broker.transporter.opts && this.broker.transporter.opts.urls) {
+					if (!this.broker.transporter.opts.urls.includes(peerUrl)) {
+						this.broker.transporter.opts.urls.push(peerUrl);
+						this.logger.debug(`Added peer URL to transporter options: ${peerUrl}`);
+						return true;
+					}
+				}
+
+				// Méthode 3: Créer une nouvelle connexion via le registry
+				const [hostPort, nodeID] = peerUrl.split('/');
+				const [host, port] = hostPort.split(':');
+				
+				if (nodeID && host && port) {
+					// Essayer de déclencher une découverte manuelle
+					this.broker.registry.discoverer.discoverNode(nodeID);
+					this.logger.debug(`Triggered discovery for node: ${nodeID}`);
+					return true;
+				}
+
+				return false;
+
+			} catch (err) {
+				this.logger.error(`Failed to add peer ${peerUrl}:`, err);
+				return false;
+			}
+		},
+
+		/**
+		 * Connecter aux peers découverts
+		 */
+		async connectToDiscoveredPeers() {
 			try {
 				const bootstrapUrls = await this.getBootstrapUrls();
 				
-				if (bootstrapUrls.length > 0) {
-					// Si le transporter supporte la mise à jour dynamique des peers
-					if (this.broker.transporter && this.broker.transporter.addPeer) {
-						for (const url of bootstrapUrls) {
-							this.broker.transporter.addPeer(url);
+				if (bootstrapUrls.length === 0) {
+					this.logger.debug("No bootstrap URLs received from discovery");
+					return;
+				}
+
+				// Obtenir la liste des nœuds actuellement connectés
+				const connectedNodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
+				const connectedNodeIds = connectedNodes.map(node => node.id);
+
+				let newConnections = 0;
+				
+				for (const url of bootstrapUrls) {
+					try {
+						// Extraire le nodeID de l'URL
+						const [hostPort, nodeID] = url.split('/');
+						
+						// Vérifier si on n'est pas déjà connecté à ce nœud
+						if (nodeID && !connectedNodeIds.includes(nodeID) && nodeID !== this.broker.nodeID) {
+							const success = await this.addPeerToTransporter(url);
+							if (success) {
+								newConnections++;
+								this.logger.info(`Connected to new peer: ${url}`);
+							}
+						} else {
+							this.logger.debug(`Skipping already connected or self node: ${nodeID}`);
 						}
-						this.logger.info(`Added ${bootstrapUrls.length} peers to transporter`);
+					} catch (err) {
+						this.logger.warn(`Failed to connect to peer ${url}:`, err.message);
 					}
 				}
+
+				if (newConnections > 0) {
+					this.logger.info(`Successfully connected to ${newConnections} new peers`);
+					
+					// Attendre un peu pour que les connexions s'établissent
+					setTimeout(async () => {
+						const newConnectedNodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
+						this.logger.info(`Total connected nodes after discovery: ${newConnectedNodes.length}`, {
+							nodeIds: newConnectedNodes.map(n => n.id)
+						});
+					}, 2000);
+				} else {
+					this.logger.debug("No new peer connections established");
+				}
+
 			} catch (err) {
-				this.logger.error("Failed to update transporter peers:", err);
+				this.logger.error("Failed to connect to discovered peers:", err);
+			}
+		},
+
+		/**
+		 * Diagnostiquer le transporter
+		 */
+		diagnosticTransporter() {
+			if (this.broker.transporter) {
+				this.logger.debug("Transporter diagnostic:", {
+					type: this.broker.transporter.constructor.name,
+					connected: this.broker.transporter.connected,
+					hasConnect: typeof this.broker.transporter.connect === 'function',
+					hasOpts: !!this.broker.transporter.opts,
+					optsUrls: this.broker.transporter.opts ? this.broker.transporter.opts.urls : null,
+					methods: Object.getOwnPropertyNames(this.broker.transporter).filter(name => typeof this.broker.transporter[name] === 'function')
+				});
+			} else {
+				this.logger.warn("No transporter available");
 			}
 		}
 	},
@@ -244,6 +353,9 @@ module.exports = {
 			localIP: this.getLocalIP()
 		});
 
+		// Diagnostic du transporter
+		this.diagnosticTransporter();
+
 		// S'enregistrer auprès du discovery
 		try {
 			await this.registerWithDiscovery();
@@ -251,8 +363,11 @@ module.exports = {
 			this.logger.error("Initial registration failed:", err);
 		}
 
-		// Mettre à jour les peers
-		await this.updateTransporterPeers();
+		// Attendre que le broker soit complètement initialisé
+		setTimeout(async () => {
+			// Découvrir et connecter aux peers
+			await this.connectToDiscoveredPeers();
+		}, 3000);
 
 		// Démarrer le heartbeat
 		this.heartbeatTimer = setInterval(() => {
@@ -261,7 +376,7 @@ module.exports = {
 
 		// Démarrer la découverte périodique des peers
 		this.peerDiscoveryTimer = setInterval(() => {
-			this.updateTransporterPeers();
+			this.connectToDiscoveredPeers();
 		}, this.settings.peerDiscoveryInterval);
 	},
 
