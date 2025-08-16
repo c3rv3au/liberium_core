@@ -8,7 +8,10 @@ module.exports = {
 		// Intervalle de nettoyage des abonnements expirés (en ms)
 		cleanupInterval: 30000,
 		// TTL par défaut pour les abonnements (en ms) 
-		subscriptionTTL: 300000 // 5 minutes
+		subscriptionTTL: 300000, // 5 minutes
+		// Métriques de communication
+		metricsRetention: 60000, // 1 minute
+		maxMetricsEntries: 1000
 	},
 
 	actions: {
@@ -158,6 +161,15 @@ module.exports = {
 		},
 
 		/**
+		 * Obtenir les métriques de communication du service
+		 */
+		getMetrics: {
+			handler(ctx) {
+				return this.getServiceMetrics();
+			}
+		},
+
+		/**
 		 * Lister tous les abonnements actifs
 		 */
 		listSubscriptions: {
@@ -174,7 +186,8 @@ module.exports = {
 				return {
 					subscriptions,
 					totalSubscribers: this.subscriptions.size,
-					sharedMemoryKeys: Object.keys(this.shared_memory)
+					sharedMemoryKeys: Object.keys(this.shared_memory),
+					metrics: this.getServiceMetrics()
 				};
 			}
 		}
@@ -212,6 +225,269 @@ module.exports = {
 	},
 
 	methods: {
+		/**
+		 * Enregistrer un appel sortant
+		 */
+		recordOutgoingCall(targetService, action, params, duration) {
+			const now = Date.now();
+			const entry = {
+				timestamp: now,
+				target: targetService,
+				action,
+				duration: duration || 0,
+				paramSize: this.calculateSize(params),
+				direction: 'outgoing'
+			};
+
+			this.communicationMetrics.push(entry);
+			this.cleanupOldMetrics();
+		},
+
+		/**
+		 * Enregistrer un appel entrant
+		 */
+		recordIncomingCall(sourceService, action, params, duration) {
+			const now = Date.now();
+			const entry = {
+				timestamp: now,
+				source: sourceService,
+				action,
+				duration: duration || 0,
+				paramSize: this.calculateSize(params),
+				direction: 'incoming'
+			};
+
+			this.communicationMetrics.push(entry);
+			this.cleanupOldMetrics();
+		},
+
+		/**
+		 * Calculer la taille approximative d'un objet
+		 */
+		calculateSize(obj) {
+			if (!obj) return 0;
+			try {
+				return JSON.stringify(obj).length;
+			} catch (err) {
+				return 0;
+			}
+		},
+
+		/**
+		 * Obtenir les métriques du service
+		 */
+		getServiceMetrics() {
+			const now = Date.now();
+			const recentMetrics = this.communicationMetrics.filter(
+				m => now - m.timestamp <= this.settings.metricsRetention
+			);
+
+			const outgoing = recentMetrics.filter(m => m.direction === 'outgoing');
+			const incoming = recentMetrics.filter(m => m.direction === 'incoming');
+
+			return {
+				nodeId: this.broker.nodeID,
+				serviceName: this.name,
+				timestamp: now,
+				summary: {
+					totalCalls: recentMetrics.length,
+					outgoingCalls: outgoing.length,
+					incomingCalls: incoming.length,
+					callsPerSecond: recentMetrics.length / (this.settings.metricsRetention / 1000),
+					averageDuration: this.calculateAverageDuration(recentMetrics),
+					totalDataSize: recentMetrics.reduce((acc, m) => acc + m.paramSize, 0)
+				},
+				outgoing: this.groupMetricsByTarget(outgoing),
+				incoming: this.groupMetricsBySource(incoming),
+				actions: this.groupMetricsByAction(recentMetrics),
+				trends: this.calculateTrends()
+			};
+		},
+
+		/**
+		 * Grouper les métriques par cible
+		 */
+		groupMetricsByTarget(metrics) {
+			const grouped = {};
+			metrics.forEach(metric => {
+				const target = metric.target;
+				if (!grouped[target]) {
+					grouped[target] = {
+						calls: 0,
+						totalDuration: 0,
+						totalSize: 0,
+						actions: {}
+					};
+				}
+				grouped[target].calls++;
+				grouped[target].totalDuration += metric.duration;
+				grouped[target].totalSize += metric.paramSize;
+				grouped[target].actions[metric.action] = (grouped[target].actions[metric.action] || 0) + 1;
+			});
+
+			// Calculer les moyennes
+			Object.values(grouped).forEach(group => {
+				group.averageDuration = group.calls > 0 ? group.totalDuration / group.calls : 0;
+				group.averageSize = group.calls > 0 ? group.totalSize / group.calls : 0;
+				group.callsPerSecond = group.calls / (this.settings.metricsRetention / 1000);
+			});
+
+			return grouped;
+		},
+
+		/**
+		 * Grouper les métriques par source
+		 */
+		groupMetricsBySource(metrics) {
+			const grouped = {};
+			metrics.forEach(metric => {
+				const source = metric.source;
+				if (!grouped[source]) {
+					grouped[source] = {
+						calls: 0,
+						totalDuration: 0,
+						totalSize: 0,
+						actions: {}
+					};
+				}
+				grouped[source].calls++;
+				grouped[source].totalDuration += metric.duration;
+				grouped[source].totalSize += metric.paramSize;
+				grouped[source].actions[metric.action] = (grouped[source].actions[metric.action] || 0) + 1;
+			});
+
+			// Calculer les moyennes
+			Object.values(grouped).forEach(group => {
+				group.averageDuration = group.calls > 0 ? group.totalDuration / group.calls : 0;
+				group.averageSize = group.calls > 0 ? group.totalSize / group.calls : 0;
+				group.callsPerSecond = group.calls / (this.settings.metricsRetention / 1000);
+			});
+
+			return grouped;
+		},
+
+		/**
+		 * Grouper les métriques par action
+		 */
+		groupMetricsByAction(metrics) {
+			const grouped = {};
+			metrics.forEach(metric => {
+				const action = metric.action;
+				if (!grouped[action]) {
+					grouped[action] = {
+						calls: 0,
+						totalDuration: 0,
+						averageDuration: 0,
+						callsPerSecond: 0
+					};
+				}
+				grouped[action].calls++;
+				grouped[action].totalDuration += metric.duration;
+			});
+
+			// Calculer les moyennes
+			Object.values(grouped).forEach(group => {
+				group.averageDuration = group.calls > 0 ? group.totalDuration / group.calls : 0;
+				group.callsPerSecond = group.calls / (this.settings.metricsRetention / 1000);
+			});
+
+			return grouped;
+		},
+
+		/**
+		 * Calculer la durée moyenne
+		 */
+		calculateAverageDuration(metrics) {
+			if (metrics.length === 0) return 0;
+			const total = metrics.reduce((acc, m) => acc + m.duration, 0);
+			return total / metrics.length;
+		},
+
+		/**
+		 * Calculer les tendances
+		 */
+		calculateTrends() {
+			const now = Date.now();
+			const intervals = [5000, 15000, 30000]; // 5s, 15s, 30s
+			const trends = {};
+
+			intervals.forEach(interval => {
+				const intervalMetrics = this.communicationMetrics.filter(
+					m => now - m.timestamp <= interval
+				);
+				
+				trends[`${interval/1000}s`] = {
+					calls: intervalMetrics.length,
+					callsPerSecond: intervalMetrics.length / (interval / 1000),
+					averageDuration: this.calculateAverageDuration(intervalMetrics)
+				};
+			});
+
+			return trends;
+		},
+
+		/**
+		 * Nettoyer les anciennes métriques
+		 */
+		cleanupOldMetrics() {
+			const now = Date.now();
+			const cutoff = now - (this.settings.metricsRetention * 2); // Garder 2x la rétention
+			
+			this.communicationMetrics = this.communicationMetrics.filter(
+				m => m.timestamp > cutoff
+			);
+
+			// Limiter le nombre d'entrées
+			if (this.communicationMetrics.length > this.settings.maxMetricsEntries) {
+				this.communicationMetrics = this.communicationMetrics.slice(-this.settings.maxMetricsEntries);
+			}
+		},
+
+		/**
+		 * Wrapper pour broker.call avec métriques
+		 */
+		async callWithMetrics(action, params, options = {}) {
+			const start = Date.now();
+			const targetService = action.split('.')[0];
+			
+			try {
+				const result = await this.broker.call(action, params, options);
+				const duration = Date.now() - start;
+				this.recordOutgoingCall(targetService, action, params, duration);
+				return result;
+			} catch (err) {
+				const duration = Date.now() - start;
+				this.recordOutgoingCall(targetService, action, params, duration);
+				throw err;
+			}
+		},
+
+		/**
+		 * Middleware pour enregistrer les appels entrants
+		 */
+		createMetricsMiddleware() {
+			return {
+				name: "Metrics",
+				localAction: (next, action) => {
+					return async (ctx) => {
+						const start = Date.now();
+						const sourceService = ctx.caller || 'unknown';
+						
+						try {
+							const result = await next(ctx);
+							const duration = Date.now() - start;
+							this.recordIncomingCall(sourceService, action.name, ctx.params, duration);
+							return result;
+						} catch (err) {
+							const duration = Date.now() - start;
+							this.recordIncomingCall(sourceService, action.name, ctx.params, duration);
+							throw err;
+						}
+					};
+				}
+			};
+		},
+
 		/**
 		 * Ajouter un abonnement
 		 */
@@ -279,7 +555,7 @@ module.exports = {
 			
 			for (const [subscriber] of this.subscriptions) {
 				try {
-					const promise = this.broker.call(`${subscriber}.updateSharedMemory`, {
+					const promise = this.callWithMetrics(`${subscriber}.updateSharedMemory`, {
 						targetService: this.name,
 						memory: this.memory
 					}).catch(err => {
@@ -388,17 +664,26 @@ module.exports = {
 		// Initialiser les abonnements (Map de Maps)
 		// Structure: subscriber -> Map(target -> {timestamp, ttl})
 		this.subscriptions = new Map();
+		
+		// Initialiser les métriques de communication
+		this.communicationMetrics = [];
+
+		// Ajouter le middleware de métriques
+		if (this.broker) {
+			this.broker.middlewares.add(this.createMetricsMiddleware());
+		}
 	},
 
 	/**
 	 * Démarrage du service
 	 */
 	async started() {
-		this.logger.info(`${this.name} service started`);
+		this.logger.info(`${this.name} service started with metrics`);
 		
 		// Démarrer le nettoyage périodique
 		this.cleanupTimer = setInterval(() => {
 			this.cleanupExpiredSubscriptions();
+			this.cleanupOldMetrics();
 		}, this.settings.cleanupInterval);
 	},
 

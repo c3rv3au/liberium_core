@@ -13,7 +13,7 @@ module.exports = {
 		cacheTTL: 15000
 	},
 
-	dependencies: ["etcd", "event-monitor"],
+	dependencies: ["etcd"],
 
 	actions: {
 		/**
@@ -23,17 +23,12 @@ module.exports = {
 			async handler(ctx) {
 				const networkAnalysis = await this.analyzeNetwork();
 				
-				// Obtenir les métriques d'événements si le service est disponible
-				let eventMetrics = null;
+				// Obtenir les métriques de communication si disponibles
+				let communicationMetrics = null;
 				try {
-					eventMetrics = await this.broker.call("event-monitor.getEventMetrics");
-                    console.log("------------------------");
-                    console.log("------------------------");
-                    console.log("event  Metrics:",eventMetrics);
-                    console.log("------------------------");
-                    console.log("------------------------");
+					communicationMetrics = await this.callWithMetrics("metrics-aggregator.getClusterMetrics");
 				} catch (err) {
-					this.logger.debug("Event monitor not available:", err.message);
+					this.logger.debug("Metrics aggregator not available:", err.message);
 				}
 
 				return {
@@ -50,18 +45,20 @@ module.exports = {
 					},
 					dependencies: networkAnalysis.dependencies,
 					statistics: networkAnalysis.statistics,
-					realTimeEvents: eventMetrics ? {
-						summary: eventMetrics.summary,
-						serviceActivity: this.enrichServicesWithEventMetrics(
+					realTimeMetrics: communicationMetrics ? {
+						summary: communicationMetrics.clusterSummary,
+						serviceActivity: this.enrichServicesWithMetrics(
 							networkAnalysis.services, 
-							eventMetrics.services
+							communicationMetrics.services
 						),
-						communication: eventMetrics.communication,
-						trends: eventMetrics.trends
+						communication: communicationMetrics.communication,
+						trends: communicationMetrics.trends,
+						nodeActivity: communicationMetrics.nodes
 					} : null
 				};
 			}
 		},
+
 		/**
 		 * Analyser l'ampleur du réseau
 		 */
@@ -124,159 +121,138 @@ module.exports = {
 		},
 
 		/**
-		 * Obtenir les métriques de communication entre services
+		 * Obtenir les métriques de communication entre services via metrics-aggregator
 		 */
 		getServiceCommunicationMetrics: {
 			params: {
 				sourceService: { type: "string", optional: true },
-				targetService: { type: "string", optional: true },
-				timeWindow: { type: "number", default: 60, min: 1, max: 300 } // secondes
+				targetService: { type: "string", optional: true }
 			},
 			async handler(ctx) {
-				const { sourceService, targetService, timeWindow } = ctx.params;
+				const { sourceService, targetService } = ctx.params;
 				
 				try {
-					const [networkData, eventMetrics] = await Promise.all([
-						this.analyzeNetwork(),
-						this.broker.call("event-monitor.getEventMetrics")
-					]);
+					let result;
+					
+					if (sourceService && targetService) {
+						// Communication spécifique entre deux services
+						result = await this.callWithMetrics("metrics-aggregator.getCommunicationMetrics", {
+							sourceService,
+							targetService
+						});
+					} else {
+						// Toutes les métriques du cluster
+						const clusterMetrics = await this.callWithMetrics("metrics-aggregator.getClusterMetrics");
+						
+						result = {
+							timestamp: Date.now(),
+							sourceService: sourceService || "all",
+							targetService: targetService || "all",
+							communication: this.filterCommunication(clusterMetrics.communication, sourceService, targetService),
+							summary: clusterMetrics.clusterSummary
+						};
+					}
 
-					const communicationData = this.buildCommunicationMatrix(
-						networkData.services,
-						eventMetrics.communication,
-						sourceService,
-						targetService
-					);
-
-					return {
-						timestamp: Date.now(),
-						timeWindow: `${timeWindow}s`,
-						sourceService: sourceService || "all",
-						targetService: targetService || "all",
-						communication: communicationData,
-						summary: {
-							totalCommunications: Object.keys(communicationData).length,
-							averageEventsPerSecond: this.calculateAverageEventsPerSecond(communicationData),
-							mostActivePair: this.findMostActiveCommunicationPair(communicationData)
-						}
-					};
+					return result;
 				} catch (err) {
 					this.logger.warn("Failed to get communication metrics:", err);
 					return {
 						timestamp: Date.now(),
-						error: "Event monitor service not available",
+						error: "Metrics aggregator service not available",
 						communication: {},
-						summary: { totalCommunications: 0, averageEventsPerSecond: 0, mostActivePair: null }
+						summary: { 
+							totalCalls: 0, 
+							totalCallsPerSecond: 0, 
+							averageDuration: 0,
+							totalServices: 0,
+							totalNodes: 0
+						}
 					};
 				}
 			}
 		},
+
+		/**
+		 * Obtenir la matrice de dépendances
+		 */
 		getDependencyMatrix: {
 			async handler(ctx) {
 				return await this.buildDependencyMatrix();
+			}
+		},
+
+		/**
+		 * Obtenir les services les plus actifs
+		 */
+		getTopActiveServices: {
+			params: {
+				limit: { type: "number", default: 10, min: 1, max: 50 }
+			},
+			async handler(ctx) {
+				const { limit } = ctx.params;
+				
+				try {
+					return await this.callWithMetrics("metrics-aggregator.getTopServices", { limit });
+				} catch (err) {
+					this.logger.warn("Failed to get top services:", err);
+					return {
+						timestamp: Date.now(),
+						topServices: [],
+						error: "Metrics aggregator not available"
+					};
+				}
 			}
 		}
 	},
 
 	methods: {
 		/**
-		 * Enrichir les services avec les métriques d'événements
+		 * Enrichir les services avec les métriques de communication
 		 */
-		enrichServicesWithEventMetrics(services, eventMetrics) {
-			if (!eventMetrics) return services;
+		enrichServicesWithMetrics(services, metricsServices) {
+			if (!metricsServices) return services;
 
 			return services.map(service => ({
 				...service,
-				eventActivity: eventMetrics[service.name] || {
-					eventsSent: { total: 0, perSecond: 0, byTarget: {} },
-					eventsReceived: { total: 0, perSecond: 0, bySource: {} },
-					totalActivity: 0,
-					bandwidth: { sent: { totalBytes: 0, bytesPerSecond: 0 }, received: { totalBytes: 0, bytesPerSecond: 0 } }
+				metrics: metricsServices[service.name] || {
+					instances: 0,
+					summary: {
+						totalCalls: 0,
+						callsPerSecond: 0,
+						averageDuration: 0,
+						totalDataSize: 0
+					},
+					outgoing: {},
+					incoming: {},
+					actions: {}
 				}
 			}));
 		},
 
 		/**
-		 * Construire la matrice de communication
+		 * Filtrer les communications selon les paramètres
 		 */
-		buildCommunicationMatrix(services, communicationMetrics, sourceFilter, targetFilter) {
-			const matrix = {};
+		filterCommunication(communication, sourceFilter, targetFilter) {
+			if (!communication) return {};
 			
-			Object.entries(communicationMetrics).forEach(([commKey, metrics]) => {
+			const filtered = {};
+			
+			Object.entries(communication).forEach(([commKey, metrics]) => {
 				const [source, target] = commKey.split('->');
 				
 				// Appliquer les filtres
 				if (sourceFilter && source !== sourceFilter) return;
 				if (targetFilter && target !== targetFilter) return;
 				
-				// Vérifier que les services existent
-				const sourceExists = services.some(s => s.name === source);
-				const targetExists = services.some(s => s.name === target);
-				
-				if (sourceExists && (targetExists || target === "broadcast")) {
-					matrix[commKey] = {
-						...metrics,
-						sourceNodeId: this.getServiceNodeId(services, source),
-						targetNodeId: target !== "broadcast" ? this.getServiceNodeId(services, target) : null,
-						isInterNode: this.isInterNodeCommunication(services, source, target)
-					};
-				}
+				filtered[commKey] = metrics;
 			});
 
-			return matrix;
+			return filtered;
 		},
 
 		/**
-		 * Obtenir l'ID du nœud pour un service
+		 * Analyser le réseau complet
 		 */
-		getServiceNodeId(services, serviceName) {
-			const service = services.find(s => s.name === serviceName);
-			return service ? service.nodeId : null;
-		},
-
-		/**
-		 * Vérifier si c'est une communication inter-nœuds
-		 */
-		isInterNodeCommunication(services, sourceService, targetService) {
-			if (targetService === "broadcast") return true;
-			
-			const sourceNodeId = this.getServiceNodeId(services, sourceService);
-			const targetNodeId = this.getServiceNodeId(services, targetService);
-			
-			return sourceNodeId && targetNodeId && sourceNodeId !== targetNodeId;
-		},
-
-		/**
-		 * Calculer la moyenne des événements par seconde
-		 */
-		calculateAverageEventsPerSecond(communicationData) {
-			const communications = Object.values(communicationData);
-			if (communications.length === 0) return 0;
-			
-			const totalEventsPerSecond = communications.reduce((acc, comm) => acc + comm.eventsPerSecond, 0);
-			return Math.round((totalEventsPerSecond / communications.length) * 100) / 100;
-		},
-
-		/**
-		 * Trouver la paire de communication la plus active
-		 */
-		findMostActiveCommunicationPair(communicationData) {
-			let mostActive = null;
-			let maxEventsPerSecond = 0;
-
-			Object.entries(communicationData).forEach(([key, metrics]) => {
-				if (metrics.eventsPerSecond > maxEventsPerSecond) {
-					maxEventsPerSecond = metrics.eventsPerSecond;
-					mostActive = {
-						pair: key,
-						eventsPerSecond: metrics.eventsPerSecond,
-						totalEvents: metrics.totalEvents
-					};
-				}
-			});
-
-			return mostActive;
-		},
 		async analyzeNetwork() {
 			const nodes = await this.analyzeNodes();
 			const services = await this.analyzeServices();
@@ -369,7 +345,6 @@ module.exports = {
 			if (typeof serviceObj === 'string') return serviceObj;
 			if (serviceObj && serviceObj.name) return serviceObj.name;
 			if (serviceObj && serviceObj.fullName) {
-				// Extraire le nom depuis fullName (format: namespace.service)
 				return serviceObj.fullName.split('.').pop();
 			}
 			return 'unknown';
@@ -608,10 +583,11 @@ module.exports = {
 
 			// Patterns de dépendances communes
 			const dependencyPatterns = {
-				'api': ['etcd', 'coderdb'], // API dépend souvent d'etcd et coderdb
-				'coderdb': ['etcd'], // coderdb dépend d'etcd pour le stockage
-				'discovery-client': ['discovery'], // discovery-client dépend de discovery
-				'network-analyzer': ['etcd'] // network-analyzer peut utiliser etcd
+				'api': ['etcd', 'coderdb', 'metrics-aggregator'], 
+				'coderdb': ['etcd'], 
+				'discovery-client': ['discovery'], 
+				'network-analyzer': ['etcd', 'metrics-aggregator'],
+				'metrics-aggregator': [] // Pas de dépendances pattern pour éviter les cycles
 			};
 
 			if (dependencyPatterns[service.name]) {
