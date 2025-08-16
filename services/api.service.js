@@ -11,7 +11,7 @@ module.exports = {
 
 	mixins: [BaseService],
 
-	dependencies: ["etcd"],
+	dependencies: [],
 
 	settings: {
 		port: process.env.API_PORT || 3001,

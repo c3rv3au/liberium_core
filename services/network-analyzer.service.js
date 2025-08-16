@@ -13,7 +13,7 @@ module.exports = {
 		cacheTTL: 15000
 	},
 
-	dependencies: ["etcd"],
+	dependencies: [],
 
 	actions: {
 		/**
@@ -583,7 +583,7 @@ module.exports = {
 
 			// Patterns de dépendances communes
 			const dependencyPatterns = {
-				'api': ['etcd', 'coderdb', 'metrics-aggregator'], 
+				'api': ['etcd', 'metrics-aggregator'], 
 				'coderdb': ['etcd'], 
 				'discovery-client': ['discovery'], 
 				'network-analyzer': ['etcd', 'metrics-aggregator'],
