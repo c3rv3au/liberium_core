@@ -1,7 +1,7 @@
 // services/binance.service.js
 "use strict";
 
-const ccxt = require("ccxt");
+const WebSocket = require('ws');
 const BaseService = require("./base.service");
 
 module.exports = {
@@ -9,38 +9,27 @@ module.exports = {
 
 	mixins: [BaseService],
 
-	dependencies: [],
-
 	settings: {
-		// Symboles à surveiller en temps réel
-		watchSymbols: ["BNB/USDT"],
+		// Symboles à surveiller (format Binance: bnbusdt)
+		watchSymbols: ["bnbusdt"],
 		
-		// Configuration WebSocket
+		// URLs WebSocket Binance
 		websocket: {
-			enabled: true,
+			baseUrl: "wss://stream.binance.com:9443/ws/",
+			streamUrl: "wss://stream.binance.com:9443/stream?streams=",
 			reconnectDelay: 5000,
-			maxReconnectAttempts: 10
+			maxReconnectAttempts: 10,
+			pingInterval: 30000
 		},
 		
-		// Configuration de l'exchange
-		exchange: {
-			id: "binance",
-			sandbox: process.env.NODE_ENV !== "production",
-			apiKey: process.env.BINANCE_API_KEY,
-			secret: process.env.BINANCE_SECRET,
-			options: {
-				defaultType: "spot"
-			}
-		},
+		// Timeframes pour les klines
+		klineIntervals: ["1m", "5m", "15m", "1h", "4h", "1d"],
 		
-		// Timeframes pour les candlesticks
-		candleTimeframes: ["1m", "5m", "15m", "1h", "4h", "1d"],
-		
-		// Paramètres de stockage
+		// Limites de stockage
 		storage: {
-			maxCandles: 1000,
 			maxTrades: 500,
-			maxOrderBookLevels: 100
+			maxKlines: 1000,
+			maxDepthLevels: 100
 		}
 	},
 
@@ -54,14 +43,14 @@ module.exports = {
 					timestamp: Date.now(),
 					symbols: this.settings.watchSymbols,
 					data: this.memory,
-					status: this.getConnectionStatus(),
+					connections: this.getConnectionStatus(),
 					uptime: this.getUptime()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir les tickers en temps réel
+		 * Obtenir les tickers 24h
 		 */
 		getTickers: {
 			params: {
@@ -71,64 +60,94 @@ module.exports = {
 				const { symbol } = ctx.params;
 				
 				if (symbol) {
+					const binanceSymbol = symbol.toLowerCase().replace('/', '');
 					return {
 						symbol,
-						ticker: this.memory.tickers?.[symbol] || null,
+						ticker: this.memory.tickers?.[binanceSymbol] || null,
 						timestamp: Date.now()
 					};
 				}
 				
 				return {
 					tickers: this.memory.tickers || {},
-					symbols: Object.keys(this.memory.tickers || {}),
+					count: Object.keys(this.memory.tickers || {}).length,
 					timestamp: Date.now()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir les candlesticks
+		 * Obtenir les prix en temps réel
 		 */
-		getCandles: {
+		getPrices: {
 			params: {
-				symbol: { type: "string", optional: true },
-				timeframe: { type: "string", optional: true, default: "1m" },
-				limit: { type: "number", optional: true, default: 100 }
+				symbol: { type: "string", optional: true }
 			},
 			handler(ctx) {
-				const { symbol, timeframe, limit } = ctx.params;
+				const { symbol } = ctx.params;
 				
 				if (symbol) {
-					const candles = this.memory.candles?.[symbol]?.[timeframe] || [];
+					const binanceSymbol = symbol.toLowerCase().replace('/', '');
 					return {
 						symbol,
-						timeframe,
-						candles: candles.slice(-limit),
-						count: candles.length,
+						price: this.memory.prices?.[binanceSymbol] || null,
 						timestamp: Date.now()
 					};
 				}
 				
 				return {
-					candles: this.memory.candles || {},
+					prices: this.memory.prices || {},
+					count: Object.keys(this.memory.prices || {}).length,
 					timestamp: Date.now()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir les trades récents
+		 * Obtenir les klines (candlesticks)
+		 */
+		getKlines: {
+			params: {
+				symbol: { type: "string", optional: true },
+				interval: { type: "string", optional: true, default: "1m" },
+				limit: { type: "number", optional: true, default: 100 }
+			},
+			handler(ctx) {
+				const { symbol, interval, limit } = ctx.params;
+				
+				if (symbol) {
+					const binanceSymbol = symbol.toLowerCase().replace('/', '');
+					const klines = this.memory.klines?.[binanceSymbol]?.[interval] || [];
+					return {
+						symbol,
+						interval,
+						klines: klines.slice(-limit),
+						count: klines.length,
+						timestamp: Date.now()
+					};
+				}
+				
+				return {
+					klines: this.memory.klines || {},
+					timestamp: Date.now()
+				};
+			}
+		},
+
+		/**
+		 * Obtenir les trades en temps réel
 		 */
 		getTrades: {
 			params: {
 				symbol: { type: "string", optional: true },
-				limit: { type: "number", optional: true, default: 100 }
+				limit: { type: "number", optional: true, default: 50 }
 			},
 			handler(ctx) {
 				const { symbol, limit } = ctx.params;
 				
 				if (symbol) {
-					const trades = this.memory.trades?.[symbol] || [];
+					const binanceSymbol = symbol.toLowerCase().replace('/', '');
+					const trades = this.memory.trades?.[binanceSymbol] || [];
 					return {
 						symbol,
 						trades: trades.slice(-limit),
@@ -145,9 +164,9 @@ module.exports = {
 		},
 
 		/**
-		 * Obtenir l'order book
+		 * Obtenir le carnet d'ordres
 		 */
-		getOrderBook: {
+		getDepth: {
 			params: {
 				symbol: { type: "string", optional: true },
 				limit: { type: "number", optional: true, default: 20 }
@@ -156,55 +175,31 @@ module.exports = {
 				const { symbol, limit } = ctx.params;
 				
 				if (symbol) {
-					const orderBook = this.memory.orderBooks?.[symbol];
-					if (!orderBook) return null;
+					const binanceSymbol = symbol.toLowerCase().replace('/', '');
+					const depth = this.memory.depth?.[binanceSymbol];
+					if (!depth) return null;
 					
 					return {
 						symbol,
-						orderBook: {
-							bids: orderBook.bids?.slice(0, limit) || [],
-							asks: orderBook.asks?.slice(0, limit) || [],
-							timestamp: orderBook.timestamp,
-							datetime: orderBook.datetime
+						depth: {
+							bids: depth.bids?.slice(0, limit) || [],
+							asks: depth.asks?.slice(0, limit) || [],
+							lastUpdateId: depth.lastUpdateId,
+							timestamp: depth.timestamp
 						},
 						timestamp: Date.now()
 					};
 				}
 				
 				return {
-					orderBooks: this.memory.orderBooks || {},
+					depth: this.memory.depth || {},
 					timestamp: Date.now()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir les statistiques 24h
-		 */
-		get24hStats: {
-			params: {
-				symbol: { type: "string", optional: true }
-			},
-			handler(ctx) {
-				const { symbol } = ctx.params;
-				
-				if (symbol) {
-					return {
-						symbol,
-						stats: this.memory.stats24h?.[symbol] || null,
-						timestamp: Date.now()
-					};
-				}
-				
-				return {
-					stats24h: this.memory.stats24h || {},
-					timestamp: Date.now()
-				};
-			}
-		},
-
-		/**
-		 * Obtenir le statut de connexion
+		 * Obtenir le statut des connexions
 		 */
 		getStatus: {
 			handler(ctx) {
@@ -212,11 +207,8 @@ module.exports = {
 					status: this.getConnectionStatus(),
 					uptime: this.getUptime(),
 					symbols: this.settings.watchSymbols,
+					streams: this.getActiveStreams(),
 					dataStatus: this.getDataStatus(),
-					websocket: {
-						connected: this.wsConnected,
-						reconnectAttempts: this.reconnectAttempts
-					},
 					timestamp: Date.now()
 				};
 			}
@@ -231,45 +223,20 @@ module.exports = {
 			},
 			async handler(ctx) {
 				const { symbol } = ctx.params;
+				const binanceSymbol = symbol.toLowerCase().replace('/', '');
 				
-				if (!this.settings.watchSymbols.includes(symbol)) {
-					this.settings.watchSymbols.push(symbol);
-					await this.initializeSymbolData(symbol);
-					await this.subscribeToSymbol(symbol);
+				if (!this.settings.watchSymbols.includes(binanceSymbol)) {
+					this.settings.watchSymbols.push(binanceSymbol);
+					this.initializeSymbolData(binanceSymbol);
+					await this.subscribeToSymbol(binanceSymbol);
 					
-					this.logger.info(`Added symbol ${symbol} to watch list`);
+					this.logger.info(`Added symbol ${symbol} (${binanceSymbol}) to watch list`);
 				}
 				
 				return {
 					symbol,
+					binanceSymbol,
 					added: true,
-					watchSymbols: this.settings.watchSymbols
-				};
-			}
-		},
-
-		/**
-		 * Supprimer un symbole surveillé
-		 */
-		removeSymbol: {
-			params: {
-				symbol: "string"
-			},
-			async handler(ctx) {
-				const { symbol } = ctx.params;
-				
-				const index = this.settings.watchSymbols.indexOf(symbol);
-				if (index > -1) {
-					this.settings.watchSymbols.splice(index, 1);
-					await this.unsubscribeFromSymbol(symbol);
-					this.cleanupSymbolData(symbol);
-					
-					this.logger.info(`Removed symbol ${symbol} from watch list`);
-				}
-				
-				return {
-					symbol,
-					removed: true,
 					watchSymbols: this.settings.watchSymbols
 				};
 			}
@@ -278,47 +245,22 @@ module.exports = {
 
 	methods: {
 		/**
-		 * Initialiser l'exchange CCXT
-		 */
-		async initializeExchange() {
-			try {
-				const ExchangeClass = ccxt[this.settings.exchange.id];
-				
-				this.exchange = new ExchangeClass({
-					...this.settings.exchange,
-					verbose: false,
-					enableRateLimit: true,
-					timeout: 30000
-				});
-
-				// Charger les marchés
-				await this.exchange.loadMarkets();
-				
-				this.logger.info("Exchange initialized", {
-					exchange: this.settings.exchange.id,
-					symbolsAvailable: Object.keys(this.exchange.markets).length,
-					watchSymbols: this.settings.watchSymbols
-				});
-
-				return true;
-			} catch (err) {
-				this.logger.error("Failed to initialize exchange:", err);
-				return false;
-			}
-		},
-
-		/**
-		 * Initialiser les données en mémoire
+		 * Initialiser la structure mémoire
 		 */
 		initializeMemoryStructure() {
 			this.memory = {
-				tickers: {},
-				candles: {},
-				trades: {},
-				orderBooks: {},
-				stats24h: {},
+				tickers: {},    // Stats 24h
+				prices: {},     // Prix temps réel
+				klines: {},     // Candlesticks
+				trades: {},     // Trades temps réel
+				depth: {},      // Carnet d'ordres
 				lastUpdate: {}
 			};
+
+			// Variables de connexion
+			this.connections = new Map();
+			this.reconnectAttempts = new Map();
+			this.activeStreams = new Set();
 
 			// Initialiser pour chaque symbole
 			this.settings.watchSymbols.forEach(symbol => {
@@ -330,241 +272,170 @@ module.exports = {
 		 * Initialiser les données d'un symbole
 		 */
 		initializeSymbolData(symbol) {
-			if (!this.memory.candles[symbol]) {
-				this.memory.candles[symbol] = {};
-				this.settings.candleTimeframes.forEach(timeframe => {
-					this.memory.candles[symbol][timeframe] = [];
+			// Klines par intervalle
+			if (!this.memory.klines[symbol]) {
+				this.memory.klines[symbol] = {};
+				this.settings.klineIntervals.forEach(interval => {
+					this.memory.klines[symbol][interval] = [];
 				});
 			}
 			
-			if (!this.memory.trades[symbol]) {
-				this.memory.trades[symbol] = [];
-			}
-			
-			if (!this.memory.tickers[symbol]) {
-				this.memory.tickers[symbol] = null;
-			}
-			
-			if (!this.memory.orderBooks[symbol]) {
-				this.memory.orderBooks[symbol] = { bids: [], asks: [], timestamp: null };
-			}
-			
-			if (!this.memory.stats24h[symbol]) {
-				this.memory.stats24h[symbol] = null;
-			}
+			// Autres données
+			if (!this.memory.trades[symbol]) this.memory.trades[symbol] = [];
+			if (!this.memory.tickers[symbol]) this.memory.tickers[symbol] = null;
+			if (!this.memory.prices[symbol]) this.memory.prices[symbol] = null;
+			if (!this.memory.depth[symbol]) this.memory.depth[symbol] = { bids: [], asks: [], lastUpdateId: 0 };
 			
 			this.memory.lastUpdate[symbol] = Date.now();
 		},
 
 		/**
-		 * Nettoyer les données d'un symbole
-		 */
-		cleanupSymbolData(symbol) {
-			delete this.memory.tickers[symbol];
-			delete this.memory.candles[symbol];
-			delete this.memory.trades[symbol];
-			delete this.memory.orderBooks[symbol];
-			delete this.memory.stats24h[symbol];
-			delete this.memory.lastUpdate[symbol];
-		},
-
-		/**
-		 * Démarrer les WebSockets
+		 * Démarrer tous les WebSockets
 		 */
 		async startWebSockets() {
-			if (!this.settings.websocket.enabled) {
-				this.logger.info("WebSocket disabled in settings");
-				return;
+			this.logger.info("Starting Binance WebSocket connections...");
+
+			for (const symbol of this.settings.watchSymbols) {
+				await this.subscribeToSymbol(symbol);
 			}
 
-			try {
-				this.wsConnected = false;
-				this.reconnectAttempts = 0;
-
-				// S'abonner aux différents flux pour chaque symbole
-				for (const symbol of this.settings.watchSymbols) {
-					await this.subscribeToSymbol(symbol);
-				}
-
-				this.wsConnected = true;
-				this.logger.info("WebSocket connections established");
-
-			} catch (err) {
-				this.logger.error("Failed to start WebSockets:", err);
-				await this.scheduleReconnect();
-			}
+			this.logger.info(`WebSocket connections established for ${this.settings.watchSymbols.length} symbols`);
 		},
 
 		/**
 		 * S'abonner aux flux d'un symbole
 		 */
 		async subscribeToSymbol(symbol) {
-			try {
-				// Ticker 24h stats
-				this.watchTicker(symbol);
+			// Créer les streams pour ce symbole
+			const streams = this.createStreamsForSymbol(symbol);
+			
+			// Connexion combinée pour tous les streams du symbole
+			const streamUrl = this.settings.websocket.streamUrl + streams.join('/');
+			
+			this.logger.info(`Connecting to streams for ${symbol.toUpperCase()}: ${streams.length} streams`);
+			
+			this.connectWebSocket(symbol, streamUrl, streams);
+		},
+
+		/**
+		 * Créer la liste des streams pour un symbole
+		 */
+		createStreamsForSymbol(symbol) {
+			const streams = [];
+
+			// Ticker 24h
+			streams.push(`${symbol}@ticker`);
+			
+			// Prix en temps réel
+			streams.push(`${symbol}@miniTicker`);
+			
+			// Trades en temps réel
+			streams.push(`${symbol}@trade`);
+			
+			// Carnet d'ordres
+			streams.push(`${symbol}@depth20@100ms`);
+			
+			// Klines pour tous les intervalles
+			this.settings.klineIntervals.forEach(interval => {
+				streams.push(`${symbol}@kline_${interval}`);
+			});
+
+			return streams;
+		},
+
+		/**
+		 * Connexion WebSocket
+		 */
+		connectWebSocket(symbol, url, streams) {
+			const ws = new WebSocket(url);
+			
+			ws.on('open', () => {
+				this.logger.info(`WebSocket connected for ${symbol.toUpperCase()}`);
+				this.connections.set(symbol, ws);
+				this.reconnectAttempts.set(symbol, 0);
+				streams.forEach(stream => this.activeStreams.add(stream));
 				
-				// Order Book
-				this.watchOrderBook(symbol);
+				// Ping périodique
+				this.startPing(ws);
+			});
+
+			ws.on('message', (data) => {
+				try {
+					const message = JSON.parse(data);
+					this.handleMessage(symbol, message);
+				} catch (err) {
+					this.logger.error(`Error parsing WebSocket message for ${symbol}:`, err);
+				}
+			});
+
+			ws.on('error', (error) => {
+				this.logger.error(`WebSocket error for ${symbol}:`, error);
+			});
+
+			ws.on('close', (code, reason) => {
+				this.logger.warn(`WebSocket closed for ${symbol}: ${code} - ${reason}`);
+				this.connections.delete(symbol);
+				streams.forEach(stream => this.activeStreams.delete(stream));
 				
-				// Trades
-				this.watchTrades(symbol);
+				// Programmer une reconnexion
+				this.scheduleReconnect(symbol);
+			});
+		},
+
+		/**
+		 * Gérer les messages WebSocket
+		 */
+		handleMessage(symbol, message) {
+			if (message.stream) {
+				const streamParts = message.stream.split('@');
+				const streamSymbol = streamParts[0];
+				const streamType = streamParts[1];
 				
-				// Candlesticks pour tous les timeframes
-				this.settings.candleTimeframes.forEach(timeframe => {
-					this.watchOHLCV(symbol, timeframe);
-				});
-
-				this.logger.debug(`Subscribed to ${symbol} streams`);
-			} catch (err) {
-				this.logger.error(`Failed to subscribe to ${symbol}:`, err);
+				switch (streamType) {
+					case 'ticker':
+						this.handleTicker(streamSymbol, message.data);
+						break;
+					case 'miniTicker':
+						this.handleMiniTicker(streamSymbol, message.data);
+						break;
+					case 'trade':
+						this.handleTrade(streamSymbol, message.data);
+						break;
+					case 'depth20@100ms':
+						this.handleDepth(streamSymbol, message.data);
+						break;
+					default:
+						if (streamType.startsWith('kline_')) {
+							const interval = streamType.replace('kline_', '');
+							this.handleKline(streamSymbol, interval, message.data);
+						}
+						break;
+				}
 			}
 		},
 
 		/**
-		 * Se désabonner des flux d'un symbole
+		 * Gérer les tickers 24h
 		 */
-		async unsubscribeFromSymbol(symbol) {
-			// CCXT gère automatiquement la désinscription
-			this.logger.debug(`Unsubscribed from ${symbol} streams`);
-		},
-
-		/**
-		 * Surveiller les tickers
-		 */
-		async watchTicker(symbol) {
-			try {
-				if (!this.exchange.has['watchTicker']) {
-					// Fallback: fetch périodique
-					this.startPeriodicTickerFetch(symbol);
-					return;
-				}
-
-				while (this.wsConnected) {
-					try {
-						const ticker = await this.exchange.watchTicker(symbol);
-						this.updateTicker(symbol, ticker);
-					} catch (err) {
-						this.logger.warn(`Ticker watch error for ${symbol}:`, err.message);
-						await this.sleep(1000);
-					}
-				}
-			} catch (err) {
-				this.logger.error(`Failed to watch ticker for ${symbol}:`, err);
-			}
-		},
-
-		/**
-		 * Surveiller l'order book
-		 */
-		async watchOrderBook(symbol) {
-			try {
-				if (!this.exchange.has['watchOrderBook']) {
-					this.startPeriodicOrderBookFetch(symbol);
-					return;
-				}
-
-				while (this.wsConnected) {
-					try {
-						const orderBook = await this.exchange.watchOrderBook(symbol);
-						this.updateOrderBook(symbol, orderBook);
-					} catch (err) {
-						this.logger.warn(`OrderBook watch error for ${symbol}:`, err.message);
-						await this.sleep(1000);
-					}
-				}
-			} catch (err) {
-				this.logger.error(`Failed to watch order book for ${symbol}:`, err);
-			}
-		},
-
-		/**
-		 * Surveiller les trades
-		 */
-		async watchTrades(symbol) {
-			try {
-				if (!this.exchange.has['watchTrades']) {
-					this.startPeriodicTradesFetch(symbol);
-					return;
-				}
-
-				while (this.wsConnected) {
-					try {
-						const trades = await this.exchange.watchTrades(symbol);
-						this.updateTrades(symbol, trades);
-					} catch (err) {
-						this.logger.warn(`Trades watch error for ${symbol}:`, err.message);
-						await this.sleep(1000);
-					}
-				}
-			} catch (err) {
-				this.logger.error(`Failed to watch trades for ${symbol}:`, err);
-			}
-		},
-
-		/**
-		 * Surveiller les OHLCV
-		 */
-		async watchOHLCV(symbol, timeframe) {
-			try {
-				if (!this.exchange.has['watchOHLCV']) {
-					this.startPeriodicCandlesFetch(symbol, timeframe);
-					return;
-				}
-
-				while (this.wsConnected) {
-					try {
-						const candles = await this.exchange.watchOHLCV(symbol, timeframe);
-						this.updateCandles(symbol, timeframe, candles);
-					} catch (err) {
-						this.logger.warn(`OHLCV watch error for ${symbol} ${timeframe}:`, err.message);
-						await this.sleep(1000);
-					}
-				}
-			} catch (err) {
-				this.logger.error(`Failed to watch OHLCV for ${symbol} ${timeframe}:`, err);
-			}
-		},
-
-		/**
-		 * Mettre à jour le ticker
-		 */
-		updateTicker(symbol, ticker) {
+		handleTicker(symbol, data) {
 			this.memory.tickers[symbol] = {
-				...ticker,
-				receivedAt: Date.now()
-			};
-			
-			// Mettre à jour les stats 24h
-			this.memory.stats24h[symbol] = {
-				symbol,
-				priceChange: ticker.change,
-				priceChangePercent: ticker.percentage,
-				prevClosePrice: ticker.previous,
-				lastPrice: ticker.last,
-				volume: ticker.baseVolume,
-				quoteVolume: ticker.quoteVolume,
-				openTime: ticker.timestamp,
-				closeTime: ticker.timestamp,
-				high: ticker.high,
-				low: ticker.low,
-				open: ticker.open,
-				close: ticker.close,
-				receivedAt: Date.now()
-			};
-			
-			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
-		},
-
-		/**
-		 * Mettre à jour l'order book
-		 */
-		updateOrderBook(symbol, orderBook) {
-			this.memory.orderBooks[symbol] = {
-				bids: orderBook.bids.slice(0, this.settings.storage.maxOrderBookLevels),
-				asks: orderBook.asks.slice(0, this.settings.storage.maxOrderBookLevels),
-				timestamp: orderBook.timestamp,
-				datetime: orderBook.datetime,
+				symbol: data.s,
+				priceChange: parseFloat(data.p),
+				priceChangePercent: parseFloat(data.P),
+				weightedAvgPrice: parseFloat(data.w),
+				prevClosePrice: parseFloat(data.x),
+				lastPrice: parseFloat(data.c),
+				lastQty: parseFloat(data.Q),
+				bidPrice: parseFloat(data.b),
+				askPrice: parseFloat(data.a),
+				openPrice: parseFloat(data.o),
+				highPrice: parseFloat(data.h),
+				lowPrice: parseFloat(data.l),
+				volume: parseFloat(data.v),
+				quoteVolume: parseFloat(data.q),
+				openTime: data.O,
+				closeTime: data.C,
+				count: data.c,
 				receivedAt: Date.now()
 			};
 			
@@ -573,18 +444,45 @@ module.exports = {
 		},
 
 		/**
-		 * Mettre à jour les trades
+		 * Gérer les mini tickers (prix temps réel)
 		 */
-		updateTrades(symbol, trades) {
-			if (!Array.isArray(trades)) return;
-
-			// Ajouter les nouveaux trades
-			this.memory.trades[symbol].push(...trades.map(trade => ({
-				...trade,
+		handleMiniTicker(symbol, data) {
+			this.memory.prices[symbol] = {
+				symbol: data.s,
+				lastPrice: parseFloat(data.c),
+				openPrice: parseFloat(data.o),
+				highPrice: parseFloat(data.h),
+				lowPrice: parseFloat(data.l),
+				volume: parseFloat(data.v),
+				quoteVolume: parseFloat(data.q),
 				receivedAt: Date.now()
-			})));
+			};
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
+		},
 
-			// Garder seulement les derniers trades
+		/**
+		 * Gérer les trades
+		 */
+		handleTrade(symbol, data) {
+			const trade = {
+				eventType: data.e,
+				eventTime: data.E,
+				symbol: data.s,
+				tradeId: data.t,
+				price: parseFloat(data.p),
+				quantity: parseFloat(data.q),
+				buyerOrderId: data.b,
+				sellerOrderId: data.a,
+				tradeTime: data.T,
+				isBuyerMaker: data.m,
+				receivedAt: Date.now()
+			};
+
+			this.memory.trades[symbol].push(trade);
+
+			// Limiter le nombre de trades stockés
 			if (this.memory.trades[symbol].length > this.settings.storage.maxTrades) {
 				this.memory.trades[symbol] = this.memory.trades[symbol]
 					.slice(-this.settings.storage.maxTrades);
@@ -595,34 +493,64 @@ module.exports = {
 		},
 
 		/**
-		 * Mettre à jour les candlesticks
+		 * Gérer le carnet d'ordres
 		 */
-		updateCandles(symbol, timeframe, candles) {
-			if (!Array.isArray(candles)) return;
+		handleDepth(symbol, data) {
+			this.memory.depth[symbol] = {
+				lastUpdateId: data.lastUpdateId,
+				bids: data.bids.map(bid => ({
+					price: parseFloat(bid[0]),
+					quantity: parseFloat(bid[1])
+				})).slice(0, this.settings.storage.maxDepthLevels),
+				asks: data.asks.map(ask => ({
+					price: parseFloat(ask[0]),
+					quantity: parseFloat(ask[1])
+				})).slice(0, this.settings.storage.maxDepthLevels),
+				timestamp: Date.now(),
+				receivedAt: Date.now()
+			};
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
+		},
 
-			const enrichedCandles = candles.map(candle => {
-				const [timestamp, open, high, low, close, volume] = candle;
-				return {
-					timestamp,
-					datetime: new Date(timestamp).toISOString(),
-					open,
-					high,
-					low,
-					close,
-					volume,
-					change: close - open,
-					changePercent: ((close - open) / open) * 100,
-					receivedAt: Date.now()
-				};
-			});
+		/**
+		 * Gérer les klines (candlesticks)
+		 */
+		handleKline(symbol, interval, data) {
+			const klineData = data.k;
+			
+			const kline = {
+				openTime: klineData.t,
+				closeTime: klineData.T,
+				symbol: klineData.s,
+				interval: klineData.i,
+				firstTradeId: klineData.f,
+				lastTradeId: klineData.L,
+				open: parseFloat(klineData.o),
+				close: parseFloat(klineData.c),
+				high: parseFloat(klineData.h),
+				low: parseFloat(klineData.l),
+				volume: parseFloat(klineData.v),
+				numberOfTrades: klineData.n,
+				isFinal: klineData.x,
+				quoteVolume: parseFloat(klineData.q),
+				takerBuyBaseVolume: parseFloat(klineData.V),
+				takerBuyQuoteVolume: parseFloat(klineData.Q),
+				change: parseFloat(klineData.c) - parseFloat(klineData.o),
+				changePercent: ((parseFloat(klineData.c) - parseFloat(klineData.o)) / parseFloat(klineData.o)) * 100,
+				receivedAt: Date.now()
+			};
 
-			// Remplacer ou ajouter les nouvelles bougies
-			this.memory.candles[symbol][timeframe] = enrichedCandles;
+			// Ne garder que les klines finalisées
+			if (kline.isFinal) {
+				this.memory.klines[symbol][interval].push(kline);
 
-			// Garder seulement les dernières bougies
-			if (this.memory.candles[symbol][timeframe].length > this.settings.storage.maxCandles) {
-				this.memory.candles[symbol][timeframe] = this.memory.candles[symbol][timeframe]
-					.slice(-this.settings.storage.maxCandles);
+				// Limiter le stockage
+				if (this.memory.klines[symbol][interval].length > this.settings.storage.maxKlines) {
+					this.memory.klines[symbol][interval] = this.memory.klines[symbol][interval]
+						.slice(-this.settings.storage.maxKlines);
+				}
 			}
 			
 			this.memory.lastUpdate[symbol] = Date.now();
@@ -630,111 +558,62 @@ module.exports = {
 		},
 
 		/**
-		 * Fallback: fetch périodique des tickers
+		 * Démarrer le ping périodique
 		 */
-		startPeriodicTickerFetch(symbol) {
-			setInterval(async () => {
-				try {
-					const ticker = await this.exchange.fetchTicker(symbol);
-					this.updateTicker(symbol, ticker);
-				} catch (err) {
-					this.logger.warn(`Periodic ticker fetch failed for ${symbol}:`, err.message);
+		startPing(ws) {
+			const pingInterval = setInterval(() => {
+				if (ws.readyState === WebSocket.OPEN) {
+					ws.ping();
+				} else {
+					clearInterval(pingInterval);
 				}
-			}, 5000); // Toutes les 5 secondes
-		},
-
-		/**
-		 * Fallback: fetch périodique de l'order book
-		 */
-		startPeriodicOrderBookFetch(symbol) {
-			setInterval(async () => {
-				try {
-					const orderBook = await this.exchange.fetchOrderBook(symbol);
-					this.updateOrderBook(symbol, orderBook);
-				} catch (err) {
-					this.logger.warn(`Periodic order book fetch failed for ${symbol}:`, err.message);
-				}
-			}, 2000); // Toutes les 2 secondes
-		},
-
-		/**
-		 * Fallback: fetch périodique des trades
-		 */
-		startPeriodicTradesFetch(symbol) {
-			setInterval(async () => {
-				try {
-					const trades = await this.exchange.fetchTrades(symbol);
-					this.updateTrades(symbol, trades);
-				} catch (err) {
-					this.logger.warn(`Periodic trades fetch failed for ${symbol}:`, err.message);
-				}
-			}, 10000); // Toutes les 10 secondes
-		},
-
-		/**
-		 * Fallback: fetch périodique des candlesticks
-		 */
-		startPeriodicCandlesFetch(symbol, timeframe) {
-			const interval = this.getTimeframeMs(timeframe);
-			
-			setInterval(async () => {
-				try {
-					const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
-					this.updateCandles(symbol, timeframe, candles);
-				} catch (err) {
-					this.logger.warn(`Periodic candles fetch failed for ${symbol} ${timeframe}:`, err.message);
-				}
-			}, Math.min(interval, 60000)); // Maximum 1 minute
-		},
-
-		/**
-		 * Convertir timeframe en millisecondes
-		 */
-		getTimeframeMs(timeframe) {
-			const timeframes = {
-				'1m': 60000,
-				'5m': 300000,
-				'15m': 900000,
-				'1h': 3600000,
-				'4h': 14400000,
-				'1d': 86400000
-			};
-			return timeframes[timeframe] || 60000;
+			}, this.settings.websocket.pingInterval);
 		},
 
 		/**
 		 * Programmer une reconnexion
 		 */
-		async scheduleReconnect() {
-			if (this.reconnectAttempts >= this.settings.websocket.maxReconnectAttempts) {
-				this.logger.error("Max reconnect attempts reached");
+		scheduleReconnect(symbol) {
+			const attempts = this.reconnectAttempts.get(symbol) || 0;
+			
+			if (attempts >= this.settings.websocket.maxReconnectAttempts) {
+				this.logger.error(`Max reconnect attempts reached for ${symbol}`);
 				return;
 			}
 
-			this.reconnectAttempts++;
-			const delay = this.settings.websocket.reconnectDelay * this.reconnectAttempts;
+			const delay = this.settings.websocket.reconnectDelay * (attempts + 1);
+			this.reconnectAttempts.set(symbol, attempts + 1);
 			
-			this.logger.info(`Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
+			this.logger.info(`Scheduling reconnect for ${symbol} in ${delay}ms (attempt ${attempts + 1})`);
 			
 			setTimeout(() => {
-				this.startWebSockets();
+				this.subscribeToSymbol(symbol);
 			}, delay);
 		},
 
 		/**
-		 * Obtenir le statut de connexion
+		 * Obtenir le statut des connexions
 		 */
 		getConnectionStatus() {
-			if (this.wsConnected) return "connected";
-			if (this.reconnectAttempts > 0) return "reconnecting";
-			return "disconnected";
+			const status = {};
+			
+			this.settings.watchSymbols.forEach(symbol => {
+				const ws = this.connections.get(symbol);
+				status[symbol] = {
+					connected: ws && ws.readyState === WebSocket.OPEN,
+					readyState: ws ? ws.readyState : 'not_connected',
+					reconnectAttempts: this.reconnectAttempts.get(symbol) || 0
+				};
+			});
+			
+			return status;
 		},
 
 		/**
-		 * Obtenir l'uptime
+		 * Obtenir les streams actifs
 		 */
-		getUptime() {
-			return this.startTime ? Date.now() - this.startTime : 0;
+		getActiveStreams() {
+			return Array.from(this.activeStreams);
 		},
 
 		/**
@@ -752,9 +631,10 @@ module.exports = {
 					timeSinceUpdate,
 					hasData: {
 						ticker: !!this.memory.tickers[symbol],
-						orderBook: !!this.memory.orderBooks[symbol],
+						price: !!this.memory.prices[symbol],
 						trades: (this.memory.trades[symbol]?.length || 0) > 0,
-						candles: Object.keys(this.memory.candles[symbol] || {}).length > 0
+						depth: !!(this.memory.depth[symbol]?.bids?.length > 0),
+						klines: Object.keys(this.memory.klines[symbol] || {}).length > 0
 					}
 				};
 			});
@@ -763,10 +643,10 @@ module.exports = {
 		},
 
 		/**
-		 * Sleep utilitaire
+		 * Obtenir l'uptime
 		 */
-		sleep(ms) {
-			return new Promise(resolve => setTimeout(resolve, ms));
+		getUptime() {
+			return this.startTime ? Date.now() - this.startTime : 0;
 		}
 	},
 
@@ -775,31 +655,23 @@ module.exports = {
 	 */
 	async started() {
 		this.startTime = Date.now();
-		this.wsConnected = false;
-		this.reconnectAttempts = 0;
 
-		this.logger.info("Starting Binance WebSocket service", {
+		this.logger.info("Starting Binance Real-Time WebSocket service", {
 			symbols: this.settings.watchSymbols,
-			timeframes: this.settings.candleTimeframes
+			intervals: this.settings.klineIntervals,
+			streams: this.settings.watchSymbols.length * (4 + this.settings.klineIntervals.length)
 		});
 
 		// Initialiser la structure mémoire
 		this.initializeMemoryStructure();
 
-		// Initialiser l'exchange
-		const exchangeReady = await this.initializeExchange();
-		if (!exchangeReady) {
-			this.logger.error("Failed to initialize exchange, service will not function properly");
-			return;
-		}
-
 		// Démarrer les WebSockets
 		await this.startWebSockets();
 
-		this.logger.info("Binance WebSocket service started successfully", {
-			status: this.getConnectionStatus(),
-			watchSymbols: this.settings.watchSymbols.length,
-			timeframes: this.settings.candleTimeframes.length
+		this.logger.info("Binance Real-Time service started successfully", {
+			symbolsCount: this.settings.watchSymbols.length,
+			streamsCount: this.getActiveStreams().length,
+			uptime: this.getUptime()
 		});
 	},
 
@@ -807,16 +679,16 @@ module.exports = {
 	 * Arrêt du service
 	 */
 	async stopped() {
-		this.wsConnected = false;
-
-		if (this.exchange) {
-			try {
-				await this.exchange.close();
-			} catch (err) {
-				this.logger.warn("Error closing exchange:", err.message);
+		// Fermer toutes les connexions WebSocket
+		for (const [symbol, ws] of this.connections.entries()) {
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.close();
 			}
 		}
 
-		this.logger.info("Binance WebSocket service stopped");
+		this.connections.clear();
+		this.activeStreams.clear();
+
+		this.logger.info("Binance Real-Time WebSocket service stopped");
 	}
 };
