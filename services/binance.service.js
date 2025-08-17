@@ -1,6 +1,7 @@
- // services/binance.service.js
+// services/binance.service.js
 "use strict";
 
+const ccxt = require("ccxt");
 const BaseService = require("./base.service");
 
 module.exports = {
@@ -8,318 +9,268 @@ module.exports = {
 
 	mixins: [BaseService],
 
-	dependencies: ["ccxt"],
+	dependencies: [],
 
 	settings: {
-		// Configuration spécifique à Binance
-		exchange: "binance",
+		// Symboles à surveiller en temps réel
+		watchSymbols: ["BNB/USDT"],
 		
-		// Symboles populaires à surveiller
-		watchSymbols: [
-			"BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", 
-			"DOT/USDT", "XRP/USDT", "LTC/USDT", "LINK/USDT"
-		],
-		
-		// Timeframes supportés
-		timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"],
-		
-		// Limites par défaut
-		defaultLimits: {
-			trades: 100,
-			ohlcv: 500,
-			orderbook: 100
+		// Configuration WebSocket
+		websocket: {
+			enabled: true,
+			reconnectDelay: 5000,
+			maxReconnectAttempts: 10
 		},
 		
-		// Intervals de mise à jour des prix
-		priceUpdateInterval: 30000, // 30 secondes
+		// Configuration de l'exchange
+		exchange: {
+			id: "binance",
+			sandbox: process.env.NODE_ENV !== "production",
+			apiKey: process.env.BINANCE_API_KEY,
+			secret: process.env.BINANCE_SECRET,
+			options: {
+				defaultType: "spot"
+			}
+		},
 		
-		// Types de compte Binance
-		accountTypes: {
-			spot: "spot",
-			future: "future", 
-			margin: "margin"
+		// Timeframes pour les candlesticks
+		candleTimeframes: ["1m", "5m", "15m", "1h", "4h", "1d"],
+		
+		// Paramètres de stockage
+		storage: {
+			maxCandles: 1000,
+			maxTrades: 500,
+			maxOrderBookLevels: 100
 		}
 	},
 
 	actions: {
 		/**
-		 * Obtenir les informations de Binance
+		 * Obtenir toutes les données temps réel
 		 */
-		getInfo: {
-			cache: {
-				keys: [],
-				ttl: 300
-			},
-			async handler(ctx) {
-				const info = await this.broker.call("ccxt.getExchangeInfo", {
-					exchange: this.settings.exchange
-				});
-				
+		getRealTimeData: {
+			handler(ctx) {
 				return {
-					...info,
-					specialFeatures: {
-						futures: true,
-						margin: true,
-						lending: true,
-						staking: true,
-						nft: true,
-						p2p: true
-					},
-					popularSymbols: this.settings.watchSymbols,
-					supportedTimeframes: this.settings.timeframes
+					timestamp: Date.now(),
+					symbols: this.settings.watchSymbols,
+					data: this.memory,
+					status: this.getConnectionStatus(),
+					uptime: this.getUptime()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir tous les symboles actifs de Binance
+		 * Obtenir les tickers en temps réel
 		 */
-		getMarkets: {
-			cache: {
-				keys: [],
-				ttl: 300,
-			},
-			async handler(ctx) {
-				const result = await this.broker.call("ccxt.loadMarkets", {
-					exchange: this.settings.exchange,
-                    timeout: 10000
-				});
-				
-				// Enrichir avec des statistiques spécifiques à Binance
-				const markets = result.markets;
-				const stats = this.analyzeMarkets(markets);
-				
-				return {
-					...result,
-					statistics: stats,
-					filtered: {
-						usdtPairs: this.filterMarkets(markets, "USDT"),
-						btcPairs: this.filterMarkets(markets, "BTC"),
-						ethPairs: this.filterMarkets(markets, "ETH"),
-						bnbPairs: this.filterMarkets(markets, "BNB")
-					}
-				};
-			}
-		},
-
-		/**
-		 * Obtenir les prix en temps réel pour les symboles populaires
-		 */
-		getPopularPrices: {
-			cache: {
-				keys: [],
-				ttl: 30
-			},
-			async handler(ctx) {
-				const symbols = ctx.params.symbols || this.settings.watchSymbols;
-				
-				const tickers = await this.broker.call("ccxt.fetchTickers", {
-					exchange: this.settings.exchange,
-					symbols,
-                    timeout: 10000
-				});
-				
-				// Enrichir avec des métriques calculées
-				const enrichedTickers = this.enrichTickers(tickers.tickers);
-				
-				return {
-					exchange: this.settings.exchange,
-					symbols,
-					prices: enrichedTickers,
-					summary: this.calculatePriceSummary(enrichedTickers),
-					timestamp: Date.now()
-				};
-			}
-		},
-
-		/**
-		 * Obtenir les données de chandelier pour un symbole
-		 */
-		getCandlesticks: {
+		getTickers: {
 			params: {
-				symbol: "string",
-				timeframe: { type: "string", default: "1h" },
-				limit: { type: "number", default: 100 },
-				since: { type: "number", optional: true }
+				symbol: { type: "string", optional: true }
 			},
-			cache: {
-				keys: ["symbol", "timeframe", "limit"],
-				ttl: 60
-			},
-			async handler(ctx) {
-				const { symbol, timeframe, limit, since } = ctx.params;
+			handler(ctx) {
+				const { symbol } = ctx.params;
 				
-				if (!this.settings.timeframes.includes(timeframe)) {
-					throw new Error(`Timeframe ${timeframe} not supported. Use: ${this.settings.timeframes.join(", ")}`);
+				if (symbol) {
+					return {
+						symbol,
+						ticker: this.memory.tickers?.[symbol] || null,
+						timestamp: Date.now()
+					};
 				}
 				
-				const result = await this.broker.call("ccxt.fetchOHLCV", {
-					exchange: this.settings.exchange,
-					symbol,
-					timeframe,
-					limit,
-					since
-				});
-				
-				// Enrichir avec des indicateurs techniques basiques
-				const enrichedData = this.enrichOHLCV(result.ohlcv);
-				
 				return {
-					...result,
-					candlesticks: enrichedData,
-					indicators: this.calculateIndicators(enrichedData),
-					metadata: {
-						period: timeframe,
-						count: enrichedData.length,
-						range: this.getDataRange(enrichedData)
-					}
-				};
-			}
-		},
-
-		/**
-		 * Obtenir le carnet d'ordres avec analyse
-		 */
-		getOrderBookAnalysis: {
-			params: {
-				symbol: "string",
-				limit: { type: "number", default: 100 }
-			},
-			cache: {
-				keys: ["symbol", "limit"],
-				ttl: 10
-			},
-			async handler(ctx) {
-				const { symbol, limit } = ctx.params;
-				
-				const result = await this.broker.call("ccxt.fetchOrderBook", {
-					exchange: this.settings.exchange,
-					symbol,
-					limit
-				});
-				
-				const analysis = this.analyzeOrderBook(result.orderbook);
-				
-				return {
-					...result,
-					analysis,
-					recommendations: this.generateOrderBookRecommendations(analysis)
-				};
-			}
-		},
-
-		/**
-		 * Obtenir les trades récents avec analyse de volume
-		 */
-		getTradesAnalysis: {
-			params: {
-				symbol: "string",
-				limit: { type: "number", default: 100 }
-			},
-			cache: {
-				keys: ["symbol", "limit"],
-				ttl: 30
-			},
-			async handler(ctx) {
-				const { symbol, limit } = ctx.params;
-				
-				const result = await this.broker.call("ccxt.fetchTrades", {
-					exchange: this.settings.exchange,
-					symbol,
-					limit
-				});
-				
-				const analysis = this.analyzeTradeVolume(result.trades);
-				
-				return {
-					...result,
-					volumeAnalysis: analysis,
-					sentiment: this.calculateTradeSentiment(result.trades)
-				};
-			}
-		},
-
-		/**
-		 * Rechercher des symboles par critères
-		 */
-		searchSymbols: {
-			params: {
-				query: { type: "string", optional: true },
-				baseAsset: { type: "string", optional: true },
-				quoteAsset: { type: "string", optional: true },
-				minVolume: { type: "number", optional: true }
-			},
-			async handler(ctx) {
-				const { query, baseAsset, quoteAsset, minVolume } = ctx.params;
-				
-				// Charger les marchés si nécessaire
-				const markets = await this.broker.call("ccxt.loadMarkets", {
-					exchange: this.settings.exchange
-				});
-				
-				// Filtrer selon les critères
-				const filtered = this.searchMarkets(markets.markets, {
-					query,
-					baseAsset,
-					quoteAsset,
-					minVolume
-				});
-				
-				return {
-					query: ctx.params,
-					results: filtered,
-					count: filtered.length,
+					tickers: this.memory.tickers || {},
+					symbols: Object.keys(this.memory.tickers || {}),
 					timestamp: Date.now()
 				};
 			}
 		},
 
 		/**
-		 * Obtenir les statistiques de trading 24h
+		 * Obtenir les candlesticks
 		 */
-		getDailyStats: {
-			cache: {
-				keys: [],
-				ttl: 300
+		getCandles: {
+			params: {
+				symbol: { type: "string", optional: true },
+				timeframe: { type: "string", optional: true, default: "1m" },
+				limit: { type: "number", optional: true, default: 100 }
 			},
-			async handler(ctx) {
-				const symbols = this.settings.watchSymbols;
+			handler(ctx) {
+				const { symbol, timeframe, limit } = ctx.params;
 				
-				const tickers = await this.broker.call("ccxt.fetchTickers", {
-					exchange: this.settings.exchange,
-					symbols
-				});
-				
-				const stats = this.calculateDailyStats(tickers.tickers);
+				if (symbol) {
+					const candles = this.memory.candles?.[symbol]?.[timeframe] || [];
+					return {
+						symbol,
+						timeframe,
+						candles: candles.slice(-limit),
+						count: candles.length,
+						timestamp: Date.now()
+					};
+				}
 				
 				return {
-					exchange: this.settings.exchange,
-					period: "24h",
-					statistics: stats,
-					topGainers: this.getTopMovers(tickers.tickers, "gainers"),
-					topLosers: this.getTopMovers(tickers.tickers, "losers"),
-					highestVolume: this.getTopVolume(tickers.tickers),
+					candles: this.memory.candles || {},
 					timestamp: Date.now()
 				};
 			}
 		},
 
 		/**
-		 * Tester la connectivité spécifique à Binance
+		 * Obtenir les trades récents
 		 */
-		testConnection: {
-			async handler(ctx) {
-				const baseTest = await this.broker.call("ccxt.testConnection", {
-					exchange: this.settings.exchange
-				});
+		getTrades: {
+			params: {
+				symbol: { type: "string", optional: true },
+				limit: { type: "number", optional: true, default: 100 }
+			},
+			handler(ctx) {
+				const { symbol, limit } = ctx.params;
 				
-				// Tests spécifiques à Binance
-				const binanceTests = await this.runBinanceSpecificTests();
+				if (symbol) {
+					const trades = this.memory.trades?.[symbol] || [];
+					return {
+						symbol,
+						trades: trades.slice(-limit),
+						count: trades.length,
+						timestamp: Date.now()
+					};
+				}
 				
 				return {
-					...baseTest,
-					binanceSpecific: binanceTests,
-					recommendation: this.getConnectionRecommendation(baseTest, binanceTests)
+					trades: this.memory.trades || {},
+					timestamp: Date.now()
+				};
+			}
+		},
+
+		/**
+		 * Obtenir l'order book
+		 */
+		getOrderBook: {
+			params: {
+				symbol: { type: "string", optional: true },
+				limit: { type: "number", optional: true, default: 20 }
+			},
+			handler(ctx) {
+				const { symbol, limit } = ctx.params;
+				
+				if (symbol) {
+					const orderBook = this.memory.orderBooks?.[symbol];
+					if (!orderBook) return null;
+					
+					return {
+						symbol,
+						orderBook: {
+							bids: orderBook.bids?.slice(0, limit) || [],
+							asks: orderBook.asks?.slice(0, limit) || [],
+							timestamp: orderBook.timestamp,
+							datetime: orderBook.datetime
+						},
+						timestamp: Date.now()
+					};
+				}
+				
+				return {
+					orderBooks: this.memory.orderBooks || {},
+					timestamp: Date.now()
+				};
+			}
+		},
+
+		/**
+		 * Obtenir les statistiques 24h
+		 */
+		get24hStats: {
+			params: {
+				symbol: { type: "string", optional: true }
+			},
+			handler(ctx) {
+				const { symbol } = ctx.params;
+				
+				if (symbol) {
+					return {
+						symbol,
+						stats: this.memory.stats24h?.[symbol] || null,
+						timestamp: Date.now()
+					};
+				}
+				
+				return {
+					stats24h: this.memory.stats24h || {},
+					timestamp: Date.now()
+				};
+			}
+		},
+
+		/**
+		 * Obtenir le statut de connexion
+		 */
+		getStatus: {
+			handler(ctx) {
+				return {
+					status: this.getConnectionStatus(),
+					uptime: this.getUptime(),
+					symbols: this.settings.watchSymbols,
+					dataStatus: this.getDataStatus(),
+					websocket: {
+						connected: this.wsConnected,
+						reconnectAttempts: this.reconnectAttempts
+					},
+					timestamp: Date.now()
+				};
+			}
+		},
+
+		/**
+		 * Ajouter un symbole à surveiller
+		 */
+		addSymbol: {
+			params: {
+				symbol: "string"
+			},
+			async handler(ctx) {
+				const { symbol } = ctx.params;
+				
+				if (!this.settings.watchSymbols.includes(symbol)) {
+					this.settings.watchSymbols.push(symbol);
+					await this.initializeSymbolData(symbol);
+					await this.subscribeToSymbol(symbol);
+					
+					this.logger.info(`Added symbol ${symbol} to watch list`);
+				}
+				
+				return {
+					symbol,
+					added: true,
+					watchSymbols: this.settings.watchSymbols
+				};
+			}
+		},
+
+		/**
+		 * Supprimer un symbole surveillé
+		 */
+		removeSymbol: {
+			params: {
+				symbol: "string"
+			},
+			async handler(ctx) {
+				const { symbol } = ctx.params;
+				
+				const index = this.settings.watchSymbols.indexOf(symbol);
+				if (index > -1) {
+					this.settings.watchSymbols.splice(index, 1);
+					await this.unsubscribeFromSymbol(symbol);
+					this.cleanupSymbolData(symbol);
+					
+					this.logger.info(`Removed symbol ${symbol} from watch list`);
+				}
+				
+				return {
+					symbol,
+					removed: true,
+					watchSymbols: this.settings.watchSymbols
 				};
 			}
 		}
@@ -327,84 +278,330 @@ module.exports = {
 
 	methods: {
 		/**
-		 * Analyser les marchés
+		 * Initialiser l'exchange CCXT
 		 */
-		analyzeMarkets(markets) {
-			const marketArray = Object.values(markets);
-			
-			return {
-				total: marketArray.length,
-				active: marketArray.filter(m => m.active).length,
-				spot: marketArray.filter(m => m.type === "spot").length,
-				future: marketArray.filter(m => m.type === "future").length,
-				margin: marketArray.filter(m => m.type === "margin").length,
-				baseAssets: [...new Set(marketArray.map(m => m.base))].length,
-				quoteAssets: [...new Set(marketArray.map(m => m.quote))].length
-			};
-		},
-
-		/**
-		 * Filtrer les marchés par quote asset
-		 */
-		filterMarkets(markets, quoteAsset) {
-			return Object.values(markets)
-				.filter(market => market.quote === quoteAsset && market.active)
-				.map(market => ({
-					symbol: market.symbol,
-					base: market.base,
-					quote: market.quote,
-					type: market.type
-				}));
-		},
-
-		/**
-		 * Enrichir les tickers avec des métriques
-		 */
-		enrichTickers(tickers) {
-			const enriched = {};
-			
-			Object.keys(tickers).forEach(symbol => {
-				const ticker = tickers[symbol];
-				enriched[symbol] = {
-					...ticker,
-					metrics: {
-						change24hPercent: ticker.percentage,
-						change24hAbs: ticker.change,
-						volumeUSD: ticker.quoteVolume,
-						priceChange: ticker.change > 0 ? "up" : ticker.change < 0 ? "down" : "stable",
-						volatility: this.calculateVolatility(ticker)
-					}
-				};
-			});
-			
-			return enriched;
-		},
-
-		/**
-		 * Calculer un résumé des prix
-		 */
-		calculatePriceSummary(tickers) {
-			const symbols = Object.keys(tickers);
-			const gainers = symbols.filter(s => tickers[s].change > 0).length;
-			const losers = symbols.filter(s => tickers[s].change < 0).length;
-			const stable = symbols.length - gainers - losers;
-			
-			return {
-				total: symbols.length,
-				gainers,
-				losers,
-				stable,
-				marketSentiment: gainers > losers ? "bullish" : losers > gainers ? "bearish" : "neutral"
-			};
-		},
-
-		/**
-		 * Enrichir les données OHLCV
-		 */
-		enrichOHLCV(ohlcv) {
-			return ohlcv.map((candle, index) => {
-				const [timestamp, open, high, low, close, volume] = candle;
+		async initializeExchange() {
+			try {
+				const ExchangeClass = ccxt[this.settings.exchange.id];
 				
+				this.exchange = new ExchangeClass({
+					...this.settings.exchange,
+					verbose: false,
+					enableRateLimit: true,
+					timeout: 30000
+				});
+
+				// Charger les marchés
+				await this.exchange.loadMarkets();
+				
+				this.logger.info("Exchange initialized", {
+					exchange: this.settings.exchange.id,
+					symbolsAvailable: Object.keys(this.exchange.markets).length,
+					watchSymbols: this.settings.watchSymbols
+				});
+
+				return true;
+			} catch (err) {
+				this.logger.error("Failed to initialize exchange:", err);
+				return false;
+			}
+		},
+
+		/**
+		 * Initialiser les données en mémoire
+		 */
+		initializeMemoryStructure() {
+			this.memory = {
+				tickers: {},
+				candles: {},
+				trades: {},
+				orderBooks: {},
+				stats24h: {},
+				lastUpdate: {}
+			};
+
+			// Initialiser pour chaque symbole
+			this.settings.watchSymbols.forEach(symbol => {
+				this.initializeSymbolData(symbol);
+			});
+		},
+
+		/**
+		 * Initialiser les données d'un symbole
+		 */
+		initializeSymbolData(symbol) {
+			if (!this.memory.candles[symbol]) {
+				this.memory.candles[symbol] = {};
+				this.settings.candleTimeframes.forEach(timeframe => {
+					this.memory.candles[symbol][timeframe] = [];
+				});
+			}
+			
+			if (!this.memory.trades[symbol]) {
+				this.memory.trades[symbol] = [];
+			}
+			
+			if (!this.memory.tickers[symbol]) {
+				this.memory.tickers[symbol] = null;
+			}
+			
+			if (!this.memory.orderBooks[symbol]) {
+				this.memory.orderBooks[symbol] = { bids: [], asks: [], timestamp: null };
+			}
+			
+			if (!this.memory.stats24h[symbol]) {
+				this.memory.stats24h[symbol] = null;
+			}
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+		},
+
+		/**
+		 * Nettoyer les données d'un symbole
+		 */
+		cleanupSymbolData(symbol) {
+			delete this.memory.tickers[symbol];
+			delete this.memory.candles[symbol];
+			delete this.memory.trades[symbol];
+			delete this.memory.orderBooks[symbol];
+			delete this.memory.stats24h[symbol];
+			delete this.memory.lastUpdate[symbol];
+		},
+
+		/**
+		 * Démarrer les WebSockets
+		 */
+		async startWebSockets() {
+			if (!this.settings.websocket.enabled) {
+				this.logger.info("WebSocket disabled in settings");
+				return;
+			}
+
+			try {
+				this.wsConnected = false;
+				this.reconnectAttempts = 0;
+
+				// S'abonner aux différents flux pour chaque symbole
+				for (const symbol of this.settings.watchSymbols) {
+					await this.subscribeToSymbol(symbol);
+				}
+
+				this.wsConnected = true;
+				this.logger.info("WebSocket connections established");
+
+			} catch (err) {
+				this.logger.error("Failed to start WebSockets:", err);
+				await this.scheduleReconnect();
+			}
+		},
+
+		/**
+		 * S'abonner aux flux d'un symbole
+		 */
+		async subscribeToSymbol(symbol) {
+			try {
+				// Ticker 24h stats
+				this.watchTicker(symbol);
+				
+				// Order Book
+				this.watchOrderBook(symbol);
+				
+				// Trades
+				this.watchTrades(symbol);
+				
+				// Candlesticks pour tous les timeframes
+				this.settings.candleTimeframes.forEach(timeframe => {
+					this.watchOHLCV(symbol, timeframe);
+				});
+
+				this.logger.debug(`Subscribed to ${symbol} streams`);
+			} catch (err) {
+				this.logger.error(`Failed to subscribe to ${symbol}:`, err);
+			}
+		},
+
+		/**
+		 * Se désabonner des flux d'un symbole
+		 */
+		async unsubscribeFromSymbol(symbol) {
+			// CCXT gère automatiquement la désinscription
+			this.logger.debug(`Unsubscribed from ${symbol} streams`);
+		},
+
+		/**
+		 * Surveiller les tickers
+		 */
+		async watchTicker(symbol) {
+			try {
+				if (!this.exchange.has['watchTicker']) {
+					// Fallback: fetch périodique
+					this.startPeriodicTickerFetch(symbol);
+					return;
+				}
+
+				while (this.wsConnected) {
+					try {
+						const ticker = await this.exchange.watchTicker(symbol);
+						this.updateTicker(symbol, ticker);
+					} catch (err) {
+						this.logger.warn(`Ticker watch error for ${symbol}:`, err.message);
+						await this.sleep(1000);
+					}
+				}
+			} catch (err) {
+				this.logger.error(`Failed to watch ticker for ${symbol}:`, err);
+			}
+		},
+
+		/**
+		 * Surveiller l'order book
+		 */
+		async watchOrderBook(symbol) {
+			try {
+				if (!this.exchange.has['watchOrderBook']) {
+					this.startPeriodicOrderBookFetch(symbol);
+					return;
+				}
+
+				while (this.wsConnected) {
+					try {
+						const orderBook = await this.exchange.watchOrderBook(symbol);
+						this.updateOrderBook(symbol, orderBook);
+					} catch (err) {
+						this.logger.warn(`OrderBook watch error for ${symbol}:`, err.message);
+						await this.sleep(1000);
+					}
+				}
+			} catch (err) {
+				this.logger.error(`Failed to watch order book for ${symbol}:`, err);
+			}
+		},
+
+		/**
+		 * Surveiller les trades
+		 */
+		async watchTrades(symbol) {
+			try {
+				if (!this.exchange.has['watchTrades']) {
+					this.startPeriodicTradesFetch(symbol);
+					return;
+				}
+
+				while (this.wsConnected) {
+					try {
+						const trades = await this.exchange.watchTrades(symbol);
+						this.updateTrades(symbol, trades);
+					} catch (err) {
+						this.logger.warn(`Trades watch error for ${symbol}:`, err.message);
+						await this.sleep(1000);
+					}
+				}
+			} catch (err) {
+				this.logger.error(`Failed to watch trades for ${symbol}:`, err);
+			}
+		},
+
+		/**
+		 * Surveiller les OHLCV
+		 */
+		async watchOHLCV(symbol, timeframe) {
+			try {
+				if (!this.exchange.has['watchOHLCV']) {
+					this.startPeriodicCandlesFetch(symbol, timeframe);
+					return;
+				}
+
+				while (this.wsConnected) {
+					try {
+						const candles = await this.exchange.watchOHLCV(symbol, timeframe);
+						this.updateCandles(symbol, timeframe, candles);
+					} catch (err) {
+						this.logger.warn(`OHLCV watch error for ${symbol} ${timeframe}:`, err.message);
+						await this.sleep(1000);
+					}
+				}
+			} catch (err) {
+				this.logger.error(`Failed to watch OHLCV for ${symbol} ${timeframe}:`, err);
+			}
+		},
+
+		/**
+		 * Mettre à jour le ticker
+		 */
+		updateTicker(symbol, ticker) {
+			this.memory.tickers[symbol] = {
+				...ticker,
+				receivedAt: Date.now()
+			};
+			
+			// Mettre à jour les stats 24h
+			this.memory.stats24h[symbol] = {
+				symbol,
+				priceChange: ticker.change,
+				priceChangePercent: ticker.percentage,
+				prevClosePrice: ticker.previous,
+				lastPrice: ticker.last,
+				volume: ticker.baseVolume,
+				quoteVolume: ticker.quoteVolume,
+				openTime: ticker.timestamp,
+				closeTime: ticker.timestamp,
+				high: ticker.high,
+				low: ticker.low,
+				open: ticker.open,
+				close: ticker.close,
+				receivedAt: Date.now()
+			};
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
+		},
+
+		/**
+		 * Mettre à jour l'order book
+		 */
+		updateOrderBook(symbol, orderBook) {
+			this.memory.orderBooks[symbol] = {
+				bids: orderBook.bids.slice(0, this.settings.storage.maxOrderBookLevels),
+				asks: orderBook.asks.slice(0, this.settings.storage.maxOrderBookLevels),
+				timestamp: orderBook.timestamp,
+				datetime: orderBook.datetime,
+				receivedAt: Date.now()
+			};
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
+		},
+
+		/**
+		 * Mettre à jour les trades
+		 */
+		updateTrades(symbol, trades) {
+			if (!Array.isArray(trades)) return;
+
+			// Ajouter les nouveaux trades
+			this.memory.trades[symbol].push(...trades.map(trade => ({
+				...trade,
+				receivedAt: Date.now()
+			})));
+
+			// Garder seulement les derniers trades
+			if (this.memory.trades[symbol].length > this.settings.storage.maxTrades) {
+				this.memory.trades[symbol] = this.memory.trades[symbol]
+					.slice(-this.settings.storage.maxTrades);
+			}
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
+		},
+
+		/**
+		 * Mettre à jour les candlesticks
+		 */
+		updateCandles(symbol, timeframe, candles) {
+			if (!Array.isArray(candles)) return;
+
+			const enrichedCandles = candles.map(candle => {
+				const [timestamp, open, high, low, close, volume] = candle;
 				return {
 					timestamp,
 					datetime: new Date(timestamp).toISOString(),
@@ -415,254 +612,211 @@ module.exports = {
 					volume,
 					change: close - open,
 					changePercent: ((close - open) / open) * 100,
-					bodySize: Math.abs(close - open),
-					upperWick: high - Math.max(open, close),
-					lowerWick: Math.min(open, close) - low,
-					candleType: close > open ? "green" : close < open ? "red" : "doji"
+					receivedAt: Date.now()
 				};
 			});
+
+			// Remplacer ou ajouter les nouvelles bougies
+			this.memory.candles[symbol][timeframe] = enrichedCandles;
+
+			// Garder seulement les dernières bougies
+			if (this.memory.candles[symbol][timeframe].length > this.settings.storage.maxCandles) {
+				this.memory.candles[symbol][timeframe] = this.memory.candles[symbol][timeframe]
+					.slice(-this.settings.storage.maxCandles);
+			}
+			
+			this.memory.lastUpdate[symbol] = Date.now();
+			this.notifySubscribers();
 		},
 
 		/**
-		 * Calculer des indicateurs techniques basiques
+		 * Fallback: fetch périodique des tickers
 		 */
-		calculateIndicators(candlesticks) {
-			const closes = candlesticks.map(c => c.close);
-			const volumes = candlesticks.map(c => c.volume);
-			
-			return {
-				sma20: this.calculateSMA(closes, 20),
-				sma50: this.calculateSMA(closes, 50),
-				trend: this.detectTrend(closes),
-				support: Math.min(...closes.slice(-20)),
-				resistance: Math.max(...closes.slice(-20)),
-				avgVolume: volumes.reduce((a, b) => a + b, 0) / volumes.length
-			};
-		},
-
-		/**
-		 * Analyser le carnet d'ordres
-		 */
-		analyzeOrderBook(orderbook) {
-			const { bids, asks } = orderbook;
-			
-			const bidVolume = bids.reduce((sum, [price, amount]) => sum + amount, 0);
-			const askVolume = asks.reduce((sum, [price, amount]) => sum + amount, 0);
-			
-			const spread = asks[0][0] - bids[0][0];
-			const midPrice = (asks[0][0] + bids[0][0]) / 2;
-			
-			return {
-				spread,
-				spreadPercent: (spread / midPrice) * 100,
-				bidVolume,
-				askVolume,
-				volumeImbalance: (bidVolume - askVolume) / (bidVolume + askVolume),
-				depth: {
-					bids: bids.length,
-					asks: asks.length
-				},
-				liquidity: bidVolume + askVolume
-			};
-		},
-
-		/**
-		 * Analyser le volume des trades
-		 */
-		analyzeTradeVolume(trades) {
-			const buyTrades = trades.filter(t => t.side === "buy");
-			const sellTrades = trades.filter(t => t.side === "sell");
-			
-			const buyVolume = buyTrades.reduce((sum, t) => sum + t.amount, 0);
-			const sellVolume = sellTrades.reduce((sum, t) => sum + t.amount, 0);
-			
-			return {
-				totalTrades: trades.length,
-				buyTrades: buyTrades.length,
-				sellTrades: sellTrades.length,
-				buyVolume,
-				sellVolume,
-				volumeRatio: buyVolume / (buyVolume + sellVolume),
-				avgTradeSize: trades.reduce((sum, t) => sum + t.amount, 0) / trades.length
-			};
-		},
-
-		/**
-		 * Rechercher des marchés
-		 */
-		searchMarkets(markets, criteria) {
-			return Object.values(markets).filter(market => {
-				let matches = true;
-				
-				if (criteria.query) {
-					const query = criteria.query.toLowerCase();
-					matches = matches && (
-						market.symbol.toLowerCase().includes(query) ||
-						market.base.toLowerCase().includes(query) ||
-						market.quote.toLowerCase().includes(query)
-					);
+		startPeriodicTickerFetch(symbol) {
+			setInterval(async () => {
+				try {
+					const ticker = await this.exchange.fetchTicker(symbol);
+					this.updateTicker(symbol, ticker);
+				} catch (err) {
+					this.logger.warn(`Periodic ticker fetch failed for ${symbol}:`, err.message);
 				}
-				
-				if (criteria.baseAsset) {
-					matches = matches && market.base === criteria.baseAsset.toUpperCase();
-				}
-				
-				if (criteria.quoteAsset) {
-					matches = matches && market.quote === criteria.quoteAsset.toUpperCase();
-				}
-				
-				return matches && market.active;
-			});
+			}, 5000); // Toutes les 5 secondes
 		},
 
 		/**
-		 * Obtenir les plus gros mouvements
+		 * Fallback: fetch périodique de l'order book
 		 */
-		getTopMovers(tickers, type) {
-			const symbols = Object.keys(tickers);
+		startPeriodicOrderBookFetch(symbol) {
+			setInterval(async () => {
+				try {
+					const orderBook = await this.exchange.fetchOrderBook(symbol);
+					this.updateOrderBook(symbol, orderBook);
+				} catch (err) {
+					this.logger.warn(`Periodic order book fetch failed for ${symbol}:`, err.message);
+				}
+			}, 2000); // Toutes les 2 secondes
+		},
+
+		/**
+		 * Fallback: fetch périodique des trades
+		 */
+		startPeriodicTradesFetch(symbol) {
+			setInterval(async () => {
+				try {
+					const trades = await this.exchange.fetchTrades(symbol);
+					this.updateTrades(symbol, trades);
+				} catch (err) {
+					this.logger.warn(`Periodic trades fetch failed for ${symbol}:`, err.message);
+				}
+			}, 10000); // Toutes les 10 secondes
+		},
+
+		/**
+		 * Fallback: fetch périodique des candlesticks
+		 */
+		startPeriodicCandlesFetch(symbol, timeframe) {
+			const interval = this.getTimeframeMs(timeframe);
 			
-			return symbols
-				.map(symbol => ({
-					symbol,
-					change: tickers[symbol].change,
-					changePercent: tickers[symbol].percentage,
-					volume: tickers[symbol].quoteVolume
-				}))
-				.sort((a, b) => {
-					if (type === "gainers") {
-						return b.changePercent - a.changePercent;
-					} else {
-						return a.changePercent - b.changePercent;
+			setInterval(async () => {
+				try {
+					const candles = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
+					this.updateCandles(symbol, timeframe, candles);
+				} catch (err) {
+					this.logger.warn(`Periodic candles fetch failed for ${symbol} ${timeframe}:`, err.message);
+				}
+			}, Math.min(interval, 60000)); // Maximum 1 minute
+		},
+
+		/**
+		 * Convertir timeframe en millisecondes
+		 */
+		getTimeframeMs(timeframe) {
+			const timeframes = {
+				'1m': 60000,
+				'5m': 300000,
+				'15m': 900000,
+				'1h': 3600000,
+				'4h': 14400000,
+				'1d': 86400000
+			};
+			return timeframes[timeframe] || 60000;
+		},
+
+		/**
+		 * Programmer une reconnexion
+		 */
+		async scheduleReconnect() {
+			if (this.reconnectAttempts >= this.settings.websocket.maxReconnectAttempts) {
+				this.logger.error("Max reconnect attempts reached");
+				return;
+			}
+
+			this.reconnectAttempts++;
+			const delay = this.settings.websocket.reconnectDelay * this.reconnectAttempts;
+			
+			this.logger.info(`Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
+			
+			setTimeout(() => {
+				this.startWebSockets();
+			}, delay);
+		},
+
+		/**
+		 * Obtenir le statut de connexion
+		 */
+		getConnectionStatus() {
+			if (this.wsConnected) return "connected";
+			if (this.reconnectAttempts > 0) return "reconnecting";
+			return "disconnected";
+		},
+
+		/**
+		 * Obtenir l'uptime
+		 */
+		getUptime() {
+			return this.startTime ? Date.now() - this.startTime : 0;
+		},
+
+		/**
+		 * Obtenir le statut des données
+		 */
+		getDataStatus() {
+			const status = {};
+			
+			this.settings.watchSymbols.forEach(symbol => {
+				const lastUpdate = this.memory.lastUpdate[symbol];
+				const timeSinceUpdate = lastUpdate ? Date.now() - lastUpdate : null;
+				
+				status[symbol] = {
+					lastUpdate,
+					timeSinceUpdate,
+					hasData: {
+						ticker: !!this.memory.tickers[symbol],
+						orderBook: !!this.memory.orderBooks[symbol],
+						trades: (this.memory.trades[symbol]?.length || 0) > 0,
+						candles: Object.keys(this.memory.candles[symbol] || {}).length > 0
 					}
-				})
-				.slice(0, 10);
-		},
-
-		/**
-		 * Calculer la volatilité
-		 */
-		calculateVolatility(ticker) {
-			if (!ticker.high || !ticker.low || !ticker.close) return 0;
-			return ((ticker.high - ticker.low) / ticker.close) * 100;
-		},
-
-		/**
-		 * Calculer la moyenne mobile simple
-		 */
-		calculateSMA(values, period) {
-			if (values.length < period) return null;
-			
-			const sum = values.slice(-period).reduce((a, b) => a + b, 0);
-			return sum / period;
-		},
-
-		/**
-		 * Détecter la tendance
-		 */
-		detectTrend(prices) {
-			if (prices.length < 2) return "unknown";
-			
-			const recent = prices.slice(-10);
-			const firstHalf = recent.slice(0, 5);
-			const secondHalf = recent.slice(-5);
-			
-			const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
-			const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
-			
-			if (secondAvg > firstAvg * 1.01) return "uptrend";
-			if (secondAvg < firstAvg * 0.99) return "downtrend";
-			return "sideways";
-		},
-
-		/**
-		 * Tests spécifiques à Binance
-		 */
-		async runBinanceSpecificTests() {
-			const tests = {
-				serverTime: null,
-				exchangeInfo: null,
-				popularSymbolTest: null
-			};
-			
-			try {
-				// Test de l'heure du serveur (spécifique à Binance)
-				const timeStart = Date.now();
-				// Simuler un appel spécifique Binance
-				tests.serverTime = {
-					status: "success",
-					latency: 50 // Simulé
 				};
-				
-				// Test des symboles populaires
-				const popularTest = await this.broker.call("ccxt.fetchTicker", {
-					exchange: this.settings.exchange,
-					symbol: "BTC/USDT"
-				});
-				
-				tests.popularSymbolTest = {
-					status: "success",
-					symbol: "BTC/USDT",
-					price: popularTest.ticker.last
-				};
-				
-			} catch (err) {
-				tests.error = err.message;
-			}
+			});
 			
-			return tests;
+			return status;
 		},
 
 		/**
-		 * Obtenir des recommandations de connexion
+		 * Sleep utilitaire
 		 */
-		getConnectionRecommendation(baseTest, binanceTests) {
-			if (baseTest.status === "error") {
-				return {
-					status: "critical",
-					message: "Cannot connect to Binance",
-					actions: ["Check network connectivity", "Verify API credentials"]
-				};
-			}
-			
-			if (baseTest.loadTime > 5000) {
-				return {
-					status: "warning",
-					message: "Slow connection detected",
-					actions: ["Consider using VPN", "Check server location"]
-				};
-			}
-			
-			return {
-				status: "good",
-				message: "Binance connection is optimal",
-				actions: []
-			};
+		sleep(ms) {
+			return new Promise(resolve => setTimeout(resolve, ms));
 		}
 	},
 
 	/**
-	 * Démarrage
+	 * Démarrage du service
 	 */
 	async started() {
-		this.logger.info("Binance service started", {
-			exchange: this.settings.exchange,
-			watchSymbols: this.settings.watchSymbols.length,
-			timeframes: this.settings.timeframes
+		this.startTime = Date.now();
+		this.wsConnected = false;
+		this.reconnectAttempts = 0;
+
+		this.logger.info("Starting Binance WebSocket service", {
+			symbols: this.settings.watchSymbols,
+			timeframes: this.settings.candleTimeframes
 		});
-		
-		// Vérifier que le service CCXT est disponible
-		try {
-			await this.broker.call("ccxt.listExchanges");
-			this.logger.info("CCXT service dependency confirmed");
-		} catch (err) {
-			this.logger.error("CCXT service not available:", err.message);
+
+		// Initialiser la structure mémoire
+		this.initializeMemoryStructure();
+
+		// Initialiser l'exchange
+		const exchangeReady = await this.initializeExchange();
+		if (!exchangeReady) {
+			this.logger.error("Failed to initialize exchange, service will not function properly");
+			return;
 		}
+
+		// Démarrer les WebSockets
+		await this.startWebSockets();
+
+		this.logger.info("Binance WebSocket service started successfully", {
+			status: this.getConnectionStatus(),
+			watchSymbols: this.settings.watchSymbols.length,
+			timeframes: this.settings.candleTimeframes.length
+		});
 	},
 
 	/**
-	 * Arrêt
+	 * Arrêt du service
 	 */
 	async stopped() {
-		this.logger.info("Binance service stopped");
+		this.wsConnected = false;
+
+		if (this.exchange) {
+			try {
+				await this.exchange.close();
+			} catch (err) {
+				this.logger.warn("Error closing exchange:", err.message);
+			}
+		}
+
+		this.logger.info("Binance WebSocket service stopped");
 	}
 };
