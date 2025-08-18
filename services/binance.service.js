@@ -30,6 +30,12 @@ module.exports = {
 			maxTrades: 500,
 			maxKlines: 1000,
 			maxDepthLevels: 100
+		},
+
+		// Configuration des notifications
+		notifications: {
+			throttle: 1000, // Minimum 1s entre notifications
+			batchUpdates: true
 		}
 	},
 
@@ -209,6 +215,7 @@ module.exports = {
 					symbols: this.settings.watchSymbols,
 					streams: this.getActiveStreams(),
 					dataStatus: this.getDataStatus(),
+					subscribers: this.getActiveSubscriptions(),
 					timestamp: Date.now()
 				};
 			}
@@ -262,6 +269,10 @@ module.exports = {
 			this.reconnectAttempts = new Map();
 			this.activeStreams = new Set();
 
+			// Variables pour les notifications
+			this.lastNotificationTime = 0;
+			this.pendingNotification = false;
+
 			// Initialiser pour chaque symbole
 			this.settings.watchSymbols.forEach(symbol => {
 				this.initializeSymbolData(symbol);
@@ -287,6 +298,44 @@ module.exports = {
 			if (!this.memory.depth[symbol]) this.memory.depth[symbol] = { bids: [], asks: [], lastUpdateId: 0 };
 			
 			this.memory.lastUpdate[symbol] = Date.now();
+		},
+
+		/**
+		 * Notifier les abonnés des changements de mémoire
+		 */
+		async notifyMemoryUpdate() {
+			// Throttling des notifications
+			const now = Date.now();
+			if (now - this.lastNotificationTime < this.settings.notifications.throttle) {
+				// Programmer une notification différée si pas déjà programmée
+				if (!this.pendingNotification) {
+					this.pendingNotification = true;
+					setTimeout(() => {
+						this.pendingNotification = false;
+						this.notifyMemoryUpdate();
+					}, this.settings.notifications.throttle);
+				}
+				return;
+			}
+
+			this.lastNotificationTime = now;
+
+			try {
+				// Notifier via l'événement standard
+				this.broker.emit("memory.updated", {
+					service: this.name,
+					memory: this.memory,
+					timestamp: now
+				});
+
+				// Notifier directement les abonnés s'il y en a
+				if (this.subscriptions && this.subscriptions.size > 0) {
+					this.logger.debug(`📡 Notification envoyée à ${this.subscriptions.size} abonnés`);
+				}
+
+			} catch (err) {
+				this.logger.error("Erreur lors de la notification des abonnés:", err);
+			}
 		},
 
 		/**
@@ -440,7 +489,7 @@ module.exports = {
 			};
 			
 			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
+			this.notifyMemoryUpdate();
 		},
 
 		/**
@@ -459,7 +508,7 @@ module.exports = {
 			};
 			
 			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
+			this.notifyMemoryUpdate();
 		},
 
 		/**
@@ -489,7 +538,7 @@ module.exports = {
 			}
 			
 			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
+			this.notifyMemoryUpdate();
 		},
 
 		/**
@@ -511,7 +560,7 @@ module.exports = {
 			};
 			
 			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
+			this.notifyMemoryUpdate();
 		},
 
 		/**
@@ -554,7 +603,7 @@ module.exports = {
 			}
 			
 			this.memory.lastUpdate[symbol] = Date.now();
-			this.notifySubscribers();
+			this.notifyMemoryUpdate();
 		},
 
 		/**

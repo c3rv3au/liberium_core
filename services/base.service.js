@@ -575,24 +575,71 @@ module.exports = {
 		},
 
 		/**
-		 * Vérifier si un service existe
+		 * Vérifier si un service existe (version améliorée)
 		 */
 		async checkServiceExists(serviceName) {
 			try {
+				// Méthode 1: Vérifier via les nœuds disponibles
 				const nodes = await this.broker.registry.getNodeList({ onlyAvailable: true });
 				
 				for (const node of nodes) {
 					if (node.services && Array.isArray(node.services)) {
-						const serviceExists = node.services.some(service => 
-							service && service.name === serviceName
-						);
-						if (serviceExists) return true;
+						const serviceExists = node.services.some(service => {
+							// Gérer différents formats de service
+							if (typeof service === 'string') {
+								return service === serviceName;
+							}
+							if (service && service.name) {
+								return service.name === serviceName;
+							}
+							if (service && service.fullName) {
+								return service.fullName === serviceName || 
+									   service.fullName.endsWith('.' + serviceName);
+							}
+							return false;
+						});
+						
+						if (serviceExists) {
+							this.logger.debug(`✅ Service ${serviceName} trouvé sur le nœud ${node.id}`);
+							return true;
+						}
 					}
 				}
 				
+				// Méthode 2: Vérifier via la liste des services directement
+				const services = this.broker.registry.getServiceList({ 
+					onlyAvailable: true,
+					onlyLocal: false
+				});
+				
+				const serviceFound = services.some(service => service.name === serviceName);
+				
+				if (serviceFound) {
+					this.logger.debug(`✅ Service ${serviceName} trouvé dans la liste des services`);
+					return true;
+				}
+				
+				// Méthode 3: Essayer un appel simple pour vérifier la réactivité
+				try {
+					await this.broker.call(`${serviceName}.getStatus`, {}, { 
+						timeout: 2000,
+						retries: 0
+					});
+					this.logger.debug(`✅ Service ${serviceName} répond aux appels`);
+					return true;
+				} catch (callErr) {
+					// Si l'action n'existe pas mais le service oui, c'est OK
+					if (callErr.code === 'ACTION_NOT_FOUND') {
+						this.logger.debug(`✅ Service ${serviceName} existe (mais pas d'action getStatus)`);
+						return true;
+					}
+				}
+				
+				this.logger.debug(`❌ Service ${serviceName} non trouvé`);
 				return false;
+				
 			} catch (err) {
-				this.logger.error("Error checking service existence:", err);
+				this.logger.debug(`❌ Erreur lors de la vérification du service ${serviceName}:`, err.message);
 				return false;
 			}
 		},
